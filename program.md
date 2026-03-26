@@ -1,4 +1,4 @@
-# cadresearch
+# mesh-para
 
 This is an `autoresearch`-style loop for mesh-to-CAD surface understanding.
 
@@ -7,7 +7,7 @@ This is an `autoresearch`-style loop for mesh-to-CAD surface understanding.
 To set up a new experiment, work with the user to:
 
 1. Agree on a run tag based on today's date, for example `mar26`.
-2. Create a fresh branch `cadresearch/<tag>`.
+2. Create a fresh branch `mesh-para/<tag>`.
 3. Read the in-scope files:
    - `README.md`
    - `prepare.py`

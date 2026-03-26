@@ -1,162 +1,56 @@
-# cadresearch
+# mesh-para
 
-`cadresearch` is an `autoresearch`-style scaffold for the first stage of mesh-to-CAD:
+`mesh-para` is an `autoresearch`-inspired project for the first stage of mesh-to-CAD:
 
-- input: point clouds with normals sampled from triangle meshes
-- output: per-point primitive labels plus primitive proxy parameters
-- metric: a fixed scalar score on a locked validation set
-- contract: the agent only edits `train.py`
+- input: triangle mesh -> sampled point cloud with normals
+- output: per-point analytic surface labels, primitive proxy parameters, and boundary supervision
+- goal: improve geometric understanding enough that later primitive fitting and CAD reconstruction become practical
 
-This repo does **not** solve full Mesh -> STEP yet. It focuses on the tractable first loop: surface understanding for CAD reconstruction.
+This repo does not solve full Mesh -> STEP today. It focuses on the stage-1 problem that has a fast, fixed benchmark and can be optimized overnight by an agent.
 
-## Current scope
+The repo pattern comes from Karpathy's [autoresearch reference clone](/Volumes/bkawk/projects/mesh-para/reference), which we used as the starting point for the one-file autonomous research loop design.
 
-The initial task is:
+## Why this exists
 
-- classify each point as `plane`, `cylinder`, `cone`, `sphere`, or `other`
-- regress a compact primitive parameter vector for the points that belong to analytic surfaces
+Mesh -> STEP is not a normal format conversion. The mesh has already discarded design intent, and recovering CAD means inferring:
 
-That makes the research loop fast, measurable, and hard to game.
+- surfaces
+- boundaries
+- primitive parameters
+- eventually topology and valid BRep structure
 
-## Project contract
+This repo takes the `autoresearch` loop idea and applies it to that first learnable part.
 
-The repo mirrors `autoresearch`:
+## Current status
 
-- `build_dataset.py` builds fixed `.npz` shards once
-- `prepare.py` is read-only infrastructure: constants, dataloaders, evaluation
-- `train.py` is the only file the agent should modify
-- `program.md` is the human-written research brief
+The project has moved past the synthetic scaffold stage:
 
-## Quick start
+- real ABC-backed datasets are working
+- a guarded autonomous loop is running
+- the current best improvements came from better supervision, not bigger models
 
-```bash
-# 1. Install dependencies
-uv sync
+Important milestones so far:
 
-# 2. Build a synthetic starter dataset
-uv run build_dataset.py synthetic
+- weak PointNet-style baseline on real ABC subset:
+  - `val_score 0.137444`
+- first strong local-geometry model:
+  - `val_score 0.329439`
+- boundary-supervision baseline:
+  - `val_score 0.332057`
+- current overnight loop best:
+  - `val_score 0.359468`
 
-# 3. Verify the dataset and loader contract
-uv run prepare.py
+## Repo contract
 
-# 4. Run the baseline experiment
-uv run train.py
-```
+The repo follows the same core contract as the cloned [autoresearch reference repo](/Volumes/bkawk/projects/mesh-para/reference):
 
-## Autonomous loop
+- [build_dataset.py](/Volumes/bkawk/projects/mesh-para/build_dataset.py): builds or packs fixed shards
+- [prepare.py](/Volumes/bkawk/projects/mesh-para/prepare.py): read-only infrastructure, loading, evaluation
+- [train.py](/Volumes/bkawk/projects/mesh-para/train.py): the main editable research file
+- [program.md](/Volumes/bkawk/projects/mesh-para/program.md): human-written research brief
+- [research.py](/Volumes/bkawk/projects/mesh-para/research.py): autonomous keep-or-revert loop
 
-`research.py` is the first `autoresearch`-style runner for this repo. It:
-
-- seeds itself from the current best run
-- asks a coding agent to edit `train.py`
-- optionally syncs `train.py` to another machine
-- runs the fixed benchmark
-- keeps the change only if `val_score` improves
-- records all attempts under `artifacts/autoresearch/<run-name>/`
-
-Seed a run from an existing best log:
-
-```bash
-python3 research.py seed \
-  --run-name abc512 \
-  --baseline-log artifacts/abc_improved_512.log
-```
-
-Then run one autonomous iteration locally with Codex:
-
-```bash
-python3 research.py loop \
-  --run-name abc512 \
-  --iterations 1 \
-  --train-command 'CADRESEARCH_CACHE_DIR=artifacts/abc_cache_512 python3 train.py'
-```
-
-Or run edits locally and training on `bkawk.local`:
-
-```bash
-python3 research.py loop \
-  --run-name abc512 \
-  --iterations 4 \
-  --pre-train-command 'scp train.py bkawk.local:/data/projects/mesh-para/cadresearch/train.py' \
-  --train-command "ssh bkawk.local 'cd /data/projects/mesh-para/cadresearch && CADRESEARCH_CACHE_DIR=/data/projects/mesh-para/cadresearch/artifacts/abc_cache_512 PYTHONUNBUFFERED=1 python3 train.py'"
-```
-
-Check the current best at any time:
-
-```bash
-python3 research.py status --run-name abc512
-```
-
-The synthetic mode is only a bootstrap path so the loop is runnable immediately. For a real reverse-engineering dataset, preprocess your data into per-object `.npz` files and use the `pack` mode in `build_dataset.py`.
-
-## Working With ABC
-
-There is also a helper script for extracting a small matched raw subset from ABC archives:
-
-```bash
-python3 extract_abc_subset.py \
-  --stl-archive /path/to/abc_0000_stl2_v00.7z \
-  --step-archive /path/to/abc_0000_step_v00.7z \
-  --feat-archive /path/to/abc_0000_feat_v00.7z \
-  --output-dir /path/to/abc_subset \
-  --limit 16
-```
-
-This creates:
-
-- `manifest.json`
-- `raw/<sample_id>/mesh.stl`
-- `raw/<sample_id>/model.step`
-- `raw/<sample_id>/features.yml`
-
-That raw subset is the bridge from downloaded ABC archives to a future packer that emits `.npz` training shards.
-
-To turn an extracted raw subset into per-object `.npz` files:
-
-```bash
-python3 preprocess_abc_raw.py \
-  --input-dir /path/to/abc_subset \
-  --output-dir /path/to/abc_preprocessed \
-  --num-points 2048 \
-  --val-count 1
-```
-
-Then pack those `.npz` files into train/val shards with:
-
-```bash
-uv run build_dataset.py pack --input-dir /path/to/abc_preprocessed
-```
-
-## Dataset format
-
-Each packed sample represents one object and must contain:
-
-- `points`: `float32[num_points, 3]`
-- `normals`: `float32[num_points, 3]`
-- `labels`: `int64[num_points]`
-- `params`: `float32[num_points, 8]`
-- `param_mask`: `float32[num_points, 8]`
-
-The fixed parameter vector is:
-
-1. position `x, y, z`
-2. axis or normal `x, y, z`
-3. value `0`
-4. value `1`
-
-Its semantics are class-specific:
-
-- plane: center, normal, half-width, half-height
-- cylinder: centerline midpoint, axis, radius, half-height
-- cone: apex, axis, half-angle, height
-- sphere: center, unused axis slots, radius, angular span
-- other: ignored by `param_mask`
-
-This is intentionally a proxy target, not a final BRep.
-
-## Metric
-
-`prepare.py` computes a fixed validation score:
+The benchmark is intentionally simple:
 
 ```text
 val_score = 0.7 * macro_iou + 0.3 * (1 / (1 + param_rmse_norm))
@@ -164,13 +58,109 @@ val_score = 0.7 * macro_iou + 0.3 * (1 / (1 + param_rmse_norm))
 
 Higher is better.
 
+## Docs
+
+More detailed documentation lives in:
+
+- [Project Overview](/Volumes/bkawk/projects/mesh-para/docs/overview.md)
+- [Findings](/Volumes/bkawk/projects/mesh-para/docs/findings.md)
+- [Workflow](/Volumes/bkawk/projects/mesh-para/docs/workflow.md)
+
+## Quick start
+
+```bash
+cd /Volumes/bkawk/projects/mesh-para/cadresearch
+uv sync
+uv run build_dataset.py synthetic
+uv run prepare.py
+uv run train.py
+```
+
+For real data, pack preprocessed `.npz` samples instead of using the synthetic bootstrap.
+
+## Running the loop
+
+Seed the autonomous loop from an existing good run:
+
+```bash
+python3 research.py seed \
+  --run-name boundary512 \
+  --baseline-log artifacts/abc_boundary_512.log
+```
+
+Run one guarded iteration locally:
+
+```bash
+python3 research.py loop \
+  --run-name boundary512 \
+  --iterations 1 \
+  --train-command 'MESH_PARA_CACHE_DIR=artifacts/abc_cache_512_boundary python3 train.py'
+```
+
+Or run training on `bkawk.local`:
+
+```bash
+python3 research.py loop \
+  --run-name boundary512 \
+  --iterations 1 \
+  --pre-train-command 'scp train.py bkawk.local:/data/projects/mesh-para/train.py' \
+  --train-command "ssh bkawk.local 'cd /data/projects/mesh-para/cadresearch && MESH_PARA_CACHE_DIR=/data/projects/mesh-para/artifacts/abc_cache_512_boundary PYTHONUNBUFFERED=1 python3 train.py'"
+```
+
+Check the current best:
+
+```bash
+python3 research.py status --run-name boundary512
+```
+
+## Working with ABC
+
+The current real-data path uses matched ABC mesh, STEP, and feature archives:
+
+1. extract a matched subset with [extract_abc_subset.py](/Volumes/bkawk/projects/mesh-para/extract_abc_subset.py)
+2. preprocess raw samples with [preprocess_abc_raw.py](/Volumes/bkawk/projects/mesh-para/preprocess_abc_raw.py)
+3. pack them into fixed shards with [build_dataset.py](/Volumes/bkawk/projects/mesh-para/build_dataset.py)
+
+The extracted raw subset contains:
+
+- `mesh.stl`
+- `model.step`
+- `features.yml`
+
+The packed sample format currently includes:
+
+- `points`
+- `normals`
+- `labels`
+- `params`
+- `param_mask`
+- `boundary`
+
 ## Roadmap
 
-The scaffold is designed to grow in stages:
+Near-term:
 
-1. surface segmentation + primitive proxy regression
-2. primitive instance grouping and fitting
+- keep improving stage-1 geometric understanding
+- use the overnight loop to search around the new boundary-supervision baseline
+- validate wins on secondary audit settings
+
+## Hardware note
+
+For this repo, a faster GPU would matter a lot.
+
+Because the benchmark is a fixed wall-clock run, better hardware does not just make experiments finish sooner. It can change which models win:
+
+- more steps inside the same 5-minute budget
+- more room for slightly richer local-geometry models
+- better overnight throughput for the autonomous loop
+
+In practice, a single RTX 5090 would likely be one of the highest-leverage upgrades for this project. Two 5090s would help even more if used as parallel experiment workers rather than as a distributed trainer.
+
+More discussion is in [Findings](/Volumes/bkawk/projects/mesh-para/docs/findings.md).
+
+Later:
+
+1. primitive instance grouping
+2. primitive fitting and trimming
 3. topology assembly
-4. BRep / STEP export
-
-The autonomous loop should start at stage 1 and earn its way into later stages.
+4. valid BRep / STEP export
