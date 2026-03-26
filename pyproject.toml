@@ -1,0 +1,11 @@
+[project]
+name = "cadresearch"
+version = "0.1.0"
+description = "Autonomous research loop for mesh-to-CAD surface understanding"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0.0",
+    "torch>=2.3.0",
+    "PyYAML>=6.0.0",
+]
