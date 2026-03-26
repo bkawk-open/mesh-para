@@ -140,6 +140,15 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
 
 When the manager has prior launched runs in its history, it automatically resolves the highest-scoring completed run and uses that as the next baseline. That means you can keep pointing it at the same original source run and it will promote forward as soon as a manager-launched branch beats the old baseline.
 
+To keep the lab moving with no manual relaunches, run the supervisor layer:
+
+```bash
+python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  supervise --source-run boundary512_refocused --poll-seconds 600
+```
+
+The supervisor checks whether any `research.py loop` process is active. If the lab is idle, it asks the manager to launch the next run from the best completed baseline it knows about.
+
 ## Working with ABC
 
 The current real-data path uses matched ABC mesh, STEP, and feature archives:

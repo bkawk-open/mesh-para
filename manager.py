@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -424,6 +425,40 @@ def do_launch_next(args: argparse.Namespace) -> None:
     print(f"log_path:        {log_path}")
 
 
+def do_supervise(args: argparse.Namespace) -> None:
+    project_dir = Path(args.project_dir).resolve()
+    paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    ensure_manager_dirs(paths)
+    log_path = paths["logs"] / f"{sanitize_name(args.supervisor_name)}.log"
+
+    iteration = 0
+    while True:
+        iteration += 1
+        timestamp = utc_now()
+        active = sorted(active_run_names())
+        if active:
+            message = f"[{timestamp}] idle=false active_runs={','.join(active)}"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(message + "\n")
+            print(message, flush=True)
+        else:
+            message = f"[{timestamp}] idle=true launching_next"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(message + "\n")
+            print(message, flush=True)
+            launch_args = argparse.Namespace(**vars(args))
+            launch_args.dry_run = False
+            launch_args.require_idle = False
+            launch_args.run_name = None
+            do_launch_next(launch_args)
+            if args.once:
+                return
+
+        if args.once:
+            return
+        time.sleep(args.poll_seconds)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lab-manager for autonomous mesh-para runs.")
     parser.add_argument("--project-dir", default=".", help="Path to the mesh-para project.")
@@ -454,6 +489,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refuse to launch when any research.py loop process is already running.",
     )
     launch.set_defaults(func=do_launch_next)
+
+    supervise = subparsers.add_parser("supervise", parents=[common], help="Keep launching the next run whenever no research run is active.")
+    supervise.add_argument("--poll-seconds", type=int, default=600, help="How often to check for an idle lab state.")
+    supervise.add_argument("--supervisor-name", default="autonomy", help="Name used for supervisor log files.")
+    supervise.add_argument("--agent", choices=["codex", "claude", "none"], default="codex", help="Editing agent to invoke.")
+    supervise.add_argument("--agent-model", default=None, help="Optional model override for the agent CLI.")
+    supervise.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
+    supervise.add_argument("--dataset-cache", default=DEFAULT_DATASET_CACHE, help="Remote cache dir used by train.py.")
+    supervise.add_argument("--once", action="store_true", help="Run a single supervisor check cycle and exit.")
+    supervise.set_defaults(func=do_supervise)
 
     return parser
 

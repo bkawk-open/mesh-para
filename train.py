@@ -126,9 +126,20 @@ class LocalPointModel(nn.Module):
         global_feat = self.global_pool_proj(torch.cat([global_max, global_mean], dim=-1))
         global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
-        logits = self.classifier(fused)
-        param_pred = self.param_head(fused)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
+        # Let the boundary signal bias downstream predictions toward local evidence near edges
+        # while preserving more global context on interior points.
+        boundary_prob = torch.sigmoid(boundary_logits).unsqueeze(-1).detach()
+        task_fused = torch.cat(
+            [
+                point_feat,
+                local_feat * (1.0 + boundary_prob),
+                global_feat * (1.0 - boundary_prob),
+            ],
+            dim=-1,
+        )
+        logits = self.classifier(task_fused)
+        param_pred = self.param_head(task_fused)
         return logits, param_pred, boundary_logits
 
 
