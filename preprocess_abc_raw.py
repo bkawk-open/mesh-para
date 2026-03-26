@@ -93,6 +93,7 @@ def sample_points(
     face_labels: np.ndarray,
     face_params: np.ndarray,
     face_masks: np.ndarray,
+    face_boundary: np.ndarray,
     num_points: int,
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
@@ -111,13 +112,42 @@ def sample_points(
     labels = face_labels[face_ids].astype(np.int64)
     params = face_params[face_ids].astype(np.float32)
     masks = face_masks[face_ids].astype(np.float32)
+    boundary = face_boundary[face_ids].astype(np.float32)
     return {
         "points": points,
         "normals": normals,
         "labels": labels,
         "params": params,
         "param_mask": masks,
+        "boundary": boundary,
     }
+
+
+def vertex_key(vertex: np.ndarray) -> tuple[float, float, float]:
+    return tuple(float(x) for x in np.round(vertex.astype(np.float64), decimals=6))
+
+
+def compute_face_boundary(triangles: np.ndarray, face_labels: np.ndarray) -> np.ndarray:
+    edge_to_faces: dict[tuple[tuple[float, float, float], tuple[float, float, float]], list[int]] = {}
+    for face_idx, tri in enumerate(triangles):
+        verts = [vertex_key(tri[i]) for i in range(3)]
+        edges = [
+            tuple(sorted((verts[0], verts[1]))),
+            tuple(sorted((verts[1], verts[2]))),
+            tuple(sorted((verts[2], verts[0]))),
+        ]
+        for edge in edges:
+            edge_to_faces.setdefault(edge, []).append(face_idx)
+
+    face_boundary = np.zeros(len(triangles), dtype=np.float32)
+    for adjacent_faces in edge_to_faces.values():
+        if len(adjacent_faces) < 2:
+            continue
+        labels = {int(face_labels[idx]) for idx in adjacent_faces}
+        if len(labels) > 1:
+            for idx in adjacent_faces:
+                face_boundary[idx] = 1.0
+    return face_boundary
 
 
 def convert_sample(sample_dir: Path, output_path: Path, num_points: int, rng: np.random.Generator) -> None:
@@ -141,12 +171,15 @@ def convert_sample(sample_dir: Path, output_path: Path, num_points: int, rng: np
                 face_params[face_idx] = params
                 face_masks[face_idx] = mask
 
+    face_boundary = compute_face_boundary(triangles, face_labels)
+
     sample = sample_points(
         triangles,
         face_normals,
         face_labels,
         face_params,
         face_masks,
+        face_boundary,
         num_points,
         rng,
     )

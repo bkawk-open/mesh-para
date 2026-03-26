@@ -94,6 +94,7 @@ class PackedShardDataset(Dataset):
                 "labels": data["labels"].astype(np.int64),
                 "params": data["params"].astype(np.float32),
                 "param_mask": data["param_mask"].astype(np.float32),
+                "boundary": data["boundary"].astype(np.float32) if "boundary" in data else np.zeros(data["labels"].shape, dtype=np.float32),
             }
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
@@ -109,6 +110,7 @@ class PackedShardDataset(Dataset):
             "labels": torch.from_numpy(shard["labels"][local_index]),
             "params": torch.from_numpy(shard["params"][local_index]),
             "param_mask": torch.from_numpy(shard["param_mask"][local_index]),
+            "boundary": torch.from_numpy(shard["boundary"][local_index]),
         }
 
 
@@ -167,7 +169,8 @@ def evaluate_model(
 
     for batch in dataloader:
         batch = move_batch_to_device(batch, device)
-        logits, param_pred = model(batch["points"], batch["normals"])
+        outputs = model(batch["points"], batch["normals"])
+        logits, param_pred = outputs[:2] if isinstance(outputs, tuple) else outputs
         pred_labels = logits.argmax(dim=-1)
         total_confusion += confusion_matrix(pred_labels, batch["labels"], num_classes).to(device=device, dtype=accum_dtype)
 
@@ -226,6 +229,7 @@ def main() -> None:
     print("batch normals:", tuple(batch["normals"].shape))
     print("batch labels: ", tuple(batch["labels"].shape))
     print("batch params: ", tuple(batch["params"].shape))
+    print("batch boundary:", tuple(batch["boundary"].shape))
 
 
 if __name__ == "__main__":

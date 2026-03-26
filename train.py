@@ -33,6 +33,7 @@ class TrainConfig:
     hidden_dim: int = 128
     global_dim: int = 256
     param_loss_weight: float = 0.2
+    boundary_loss_weight: float = 0.1
     grad_clip: float = 1.0
     log_interval: int = 25
     k_neighbors: int = 8
@@ -91,12 +92,17 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, param_dim),
         )
+        self.boundary_head = nn.Sequential(
+            nn.Linear(fused_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(
         self,
         points: torch.Tensor,
         normals: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         inputs = torch.cat([points, normals], dim=-1)
         point_feat = self.point_encoder(inputs)
         neighbor_idx = knn_indices(points, self.k_neighbors)
@@ -109,26 +115,34 @@ class LocalPointModel(nn.Module):
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         logits = self.classifier(fused)
         param_pred = self.param_head(fused)
-        return logits, param_pred
+        boundary_logits = self.boundary_head(fused).squeeze(-1)
+        return logits, param_pred, boundary_logits
 
 
 def compute_loss(
     logits: torch.Tensor,
     param_pred: torch.Tensor,
+    boundary_logits: torch.Tensor,
     labels: torch.Tensor,
     target_params: torch.Tensor,
     param_mask: torch.Tensor,
+    boundary_target: torch.Tensor,
     param_scale: torch.Tensor,
     param_loss_weight: float,
+    boundary_loss_weight: float,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     cls_loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
     scale = param_scale.view(1, 1, -1)
     param_error = F.smooth_l1_loss(param_pred / scale, target_params / scale, reduction="none")
     param_loss = (param_error * param_mask).sum() / param_mask.sum().clamp(min=1.0)
-    loss = cls_loss + param_loss_weight * param_loss
+    boundary_pos = boundary_target.mean().clamp(min=1e-3, max=1.0 - 1e-3)
+    pos_weight = ((1.0 - boundary_pos) / boundary_pos).detach()
+    boundary_loss = F.binary_cross_entropy_with_logits(boundary_logits, boundary_target, pos_weight=pos_weight)
+    loss = cls_loss + param_loss_weight * param_loss + boundary_loss_weight * boundary_loss
     return loss, {
         "cls_loss": float(cls_loss.detach().item()),
         "param_loss": float(param_loss.detach().item()),
+        "boundary_loss": float(boundary_loss.detach().item()),
         "loss": float(loss.detach().item()),
     }
 
@@ -142,10 +156,19 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def get_time_budget() -> float:
+    override = os.environ.get("CADRESEARCH_TIME_BUDGET")
+    if override:
+        return float(override)
+    return float(TIME_BUDGET)
+
+
 def maybe_peak_vram_mb(device: torch.device) -> int:
     if device.type == "cuda":
         return int(torch.cuda.max_memory_allocated(device) / (1024 * 1024))
     return 0
+
+
 def main() -> None:
     torch.manual_seed(1337)
     if hasattr(torch, "set_float32_matmul_precision"):
@@ -154,6 +177,7 @@ def main() -> None:
     cfg = TrainConfig()
     spec = get_dataset_spec()
     device = get_device()
+    time_budget = get_time_budget()
     num_classes = len(spec.class_names)
     param_scale = torch.tensor(spec.param_scale, dtype=torch.float32, device=device)
 
@@ -173,7 +197,7 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats(device)
 
     step = 0
-    last_stats = {"loss": math.nan, "cls_loss": math.nan, "param_loss": math.nan}
+    last_stats = {"loss": math.nan, "cls_loss": math.nan, "param_loss": math.nan, "boundary_loss": math.nan}
     train_start = None
     budget_deadline = None
     train_iter = iter(train_loader)
@@ -187,22 +211,25 @@ def main() -> None:
 
         if train_start is None:
             train_start = time.time()
-            budget_deadline = train_start + TIME_BUDGET
+            budget_deadline = train_start + time_budget
         elif time.time() >= budget_deadline:
             break
 
         batch = move_batch_to_device(batch, device)
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        logits, param_pred = model(batch["points"], batch["normals"])
+        logits, param_pred, boundary_logits = model(batch["points"], batch["normals"])
         loss, last_stats = compute_loss(
             logits,
             param_pred,
+            boundary_logits,
             batch["labels"],
             batch["params"],
             batch["param_mask"],
+            batch["boundary"],
             param_scale,
             cfg.param_loss_weight,
+            cfg.boundary_loss_weight,
         )
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -215,7 +242,8 @@ def main() -> None:
                 f"step={step:04d} elapsed={elapsed:7.1f}s "
                 f"loss={last_stats['loss']:.4f} "
                 f"cls={last_stats['cls_loss']:.4f} "
-                f"param={last_stats['param_loss']:.4f}"
+                f"param={last_stats['param_loss']:.4f} "
+                f"boundary={last_stats['boundary_loss']:.4f}"
             )
 
     training_seconds = 0.0 if train_start is None else (time.time() - train_start)

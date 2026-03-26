@@ -35,6 +35,7 @@ class Sample:
     labels: np.ndarray
     params: np.ndarray
     param_mask: np.ndarray
+    boundary: np.ndarray
 
 
 def random_unit_vector(rng: np.random.Generator) -> np.ndarray:
@@ -244,6 +245,7 @@ def generate_synthetic_sample(num_points: int, rng: np.random.Generator) -> Samp
         labels=labels[shuffle].astype(np.int64),
         params=params[shuffle].astype(np.float32),
         param_mask=param_mask[shuffle].astype(np.float32),
+        boundary=np.zeros(num_points, dtype=np.float32),
     )
 
 
@@ -258,6 +260,8 @@ def validate_sample(sample: Sample, num_points: int) -> None:
         raise ValueError(f"params must have shape {(num_points, PARAM_DIM)}, got {sample.params.shape}")
     if sample.param_mask.shape != (num_points, PARAM_DIM):
         raise ValueError(f"param_mask must have shape {(num_points, PARAM_DIM)}, got {sample.param_mask.shape}")
+    if sample.boundary.shape != (num_points,):
+        raise ValueError(f"boundary must have shape {(num_points,)}, got {sample.boundary.shape}")
     if sample.labels.min() < 0 or sample.labels.max() >= len(CLASS_NAMES):
         raise ValueError("labels contain out-of-range class indices")
 
@@ -277,6 +281,7 @@ def resample_points(sample: Sample, num_points: int, rng: np.random.Generator) -
         labels=sample.labels[indices].astype(np.int64),
         params=sample.params[indices].astype(np.float32),
         param_mask=sample.param_mask[indices].astype(np.float32),
+        boundary=sample.boundary[indices].astype(np.float32),
     )
 
 
@@ -287,6 +292,7 @@ def stack_samples(samples: list[Sample]) -> dict[str, np.ndarray]:
         "labels": np.stack([s.labels for s in samples], axis=0).astype(np.int64),
         "params": np.stack([s.params for s in samples], axis=0).astype(np.float32),
         "param_mask": np.stack([s.param_mask for s in samples], axis=0).astype(np.float32),
+        "boundary": np.stack([s.boundary for s in samples], axis=0).astype(np.float32),
     }
 
 
@@ -412,6 +418,7 @@ def load_external_sample(path: str, num_points: int, rng: np.random.Generator) -
             labels=data["labels"].astype(np.int64),
             params=data["params"].astype(np.float32),
             param_mask=data["param_mask"].astype(np.float32),
+            boundary=data["boundary"].astype(np.float32) if "boundary" in data else np.zeros(data["labels"].shape, dtype=np.float32),
         )
     sample = resample_points(sample, num_points, rng)
     validate_sample(sample, num_points)
