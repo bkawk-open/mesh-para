@@ -113,6 +113,31 @@ Check the current best:
 python3 research.py status --run-name boundary512
 ```
 
+## Managing autonomy
+
+`research.py` is the worker loop. [manager.py](/Volumes/bkawk/projects/mesh-para/cadresearch/manager.py) is the lab-manager layer that decides what to try next when a run plateaus.
+
+Ask the manager what it thinks should happen next:
+
+```bash
+python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  recommend --source-run boundary512_refocused
+```
+
+Have it plan the next run without launching:
+
+```bash
+python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  launch-next --source-run boundary512_refocused --dry-run
+```
+
+Or let it promote the best baseline from an existing run and launch the next strategy automatically:
+
+```bash
+python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  launch-next --source-run boundary512_refocused --require-idle
+```
+
 ## Working with ABC
 
 The current real-data path uses matched ABC mesh, STEP, and feature archives:
