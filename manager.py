@@ -131,6 +131,12 @@ def load_run_history(project_dir: Path, run_name: str, artifact_root: str) -> li
     return load_jsonl(layout.history_path)
 
 
+def load_manager_state(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(read_text(path))
+
+
 def active_run_names() -> set[str]:
     result = subprocess.run(
         ["ps", "-ax", "-o", "command"],
@@ -208,6 +214,54 @@ def best_paths_for_run(project_dir: Path, run_name: str, artifact_root: str) -> 
     return best_train, best_log, state
 
 
+def completed_manager_runs(project_dir: Path, manager_history: list[dict[str, Any]], artifact_root: str) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    completed: list[dict[str, Any]] = []
+    for row in manager_history:
+        run_name = row.get("run_name")
+        if not run_name or run_name in seen or row.get("status") != "launched":
+            continue
+        seen.add(run_name)
+        try:
+            _, best_log, state = best_paths_for_run(project_dir, run_name, artifact_root)
+        except SystemExit:
+            continue
+        completed.append(
+            {
+                "run_name": run_name,
+                "best_score": float(state["best_score"]),
+                "best_log": best_log,
+                "best_train_path": project_dir / state["best_train_path"],
+                "state": state,
+                "strategy": row.get("strategy", ""),
+                "timestamp": row.get("timestamp", ""),
+            }
+        )
+    return completed
+
+
+def resolve_source_candidate(
+    project_dir: Path,
+    artifact_root: str,
+    manager_history: list[dict[str, Any]],
+    explicit_source_run: str,
+) -> dict[str, Any]:
+    best_train, best_log, source_state = best_paths_for_run(project_dir, explicit_source_run, artifact_root)
+    candidate = {
+        "run_name": explicit_source_run,
+        "best_score": float(source_state["best_score"]),
+        "best_log": best_log,
+        "best_train_path": best_train,
+        "state": source_state,
+        "strategy": "source",
+        "timestamp": source_state.get("updated_at", ""),
+    }
+    for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
+        if managed["best_score"] > candidate["best_score"]:
+            candidate = managed
+    return candidate
+
+
 def launch_screen(
     project_dir: Path,
     run_name: str,
@@ -270,12 +324,16 @@ def build_research_command(
 
 def do_recommend(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
-    history = load_run_history(project_dir, args.source_run, args.artifact_root)
+    paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    manager_history = load_jsonl(paths["history"])
+    resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
+    history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
-    manager_state = load_jsonl(manager_paths(project_dir, args.manager_root, args.manager_name)["history"])
-    strategy = choose_strategy(manager_state, args.strategy)
+    strategy = choose_strategy(manager_history, args.strategy)
 
     print(f"source_run:      {args.source_run}")
+    print(f"resolved_run:    {resolved['run_name']}")
+    print(f"resolved_score:  {resolved['best_score']:.6f}")
     print(f"completed:       {analysis['completed']}")
     print(f"plateaued:       {analysis['plateaued']}")
     print(f"tail_reverts:    {analysis['tail_reverts']}/{analysis['tail_count']}")
@@ -300,13 +358,16 @@ def do_launch_next(args: argparse.Namespace) -> None:
     if args.require_idle and active:
         raise SystemExit(f"Active research runs detected: {', '.join(sorted(active))}")
 
-    source_history = load_run_history(project_dir, args.source_run, args.artifact_root)
-    analysis = analyze_run(source_history, args.tail_window)
     manager_history = load_jsonl(paths["history"])
+    resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
+    source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
+    analysis = analyze_run(source_history, args.tail_window)
     strategy = choose_strategy(manager_history, args.strategy)
 
-    best_train, best_log, source_state = best_paths_for_run(project_dir, args.source_run, args.artifact_root)
-    run_name = args.run_name or build_run_name(args.source_run, strategy)
+    best_train = resolved["best_train_path"]
+    best_log = resolved["best_log"]
+    source_state = resolved["state"]
+    run_name = args.run_name or build_run_name(resolved["run_name"], strategy)
     log_path = project_dir / args.artifact_root / run_name / "overnight_loop.log"
 
     train_path = project_dir / "train.py"
@@ -327,6 +388,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         "timestamp": utc_now(),
         "manager_name": args.manager_name,
         "source_run": args.source_run,
+        "resolved_source_run": resolved["run_name"],
         "source_best_score": float(source_state["best_score"]),
         "source_best_log": str(best_log.relative_to(project_dir)),
         "source_best_train": str(best_train.relative_to(project_dir)),
