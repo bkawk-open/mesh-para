@@ -59,7 +59,7 @@ class LocalPointModel(nn.Module):
     Stronger but still compact:
     - encode xyz + normals together
     - aggregate simple k-NN local geometry
-    - combine local and global context for per-point predictions
+    - combine local and mixed global context for per-point predictions
     """
 
     def __init__(self, num_classes: int, param_dim: int, hidden_dim: int, global_dim: int, k_neighbors: int):
@@ -72,13 +72,17 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
         )
         self.local_mlp = nn.Sequential(
-            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.Linear((2 * hidden_dim) + 6, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
         )
         self.context_proj = nn.Sequential(
             nn.Linear(2 * hidden_dim, global_dim),
+            nn.ReLU(),
+        )
+        self.global_pool_proj = nn.Sequential(
+            nn.Linear(2 * global_dim, global_dim),
             nn.ReLU(),
         )
         fused_dim = hidden_dim + global_dim + hidden_dim
@@ -107,11 +111,20 @@ class LocalPointModel(nn.Module):
         point_feat = self.point_encoder(inputs)
         neighbor_idx = knn_indices(points, self.k_neighbors)
         neighbor_feat = gather_neighbors(point_feat, neighbor_idx)
+        neighbor_points = gather_neighbors(points, neighbor_idx)
+        neighbor_normals = gather_neighbors(normals, neighbor_idx)
         center_feat = point_feat.unsqueeze(2).expand_as(neighbor_feat)
-        edge_feat = torch.cat([center_feat, neighbor_feat - center_feat], dim=-1)
+        center_points = points.unsqueeze(2).expand_as(neighbor_points)
+        center_normals = normals.unsqueeze(2).expand_as(neighbor_normals)
+        rel_points = neighbor_points - center_points
+        rel_normals = neighbor_normals - center_normals
+        edge_feat = torch.cat([center_feat, neighbor_feat - center_feat, rel_points, rel_normals], dim=-1)
         local_feat = self.local_mlp(edge_feat).max(dim=2).values
         context_feat = self.context_proj(torch.cat([point_feat, local_feat], dim=-1))
-        global_feat = context_feat.max(dim=1, keepdim=True).values.expand(-1, points.size(1), -1)
+        global_max = context_feat.max(dim=1, keepdim=True).values
+        global_mean = context_feat.mean(dim=1, keepdim=True)
+        global_feat = self.global_pool_proj(torch.cat([global_max, global_mean], dim=-1))
+        global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         logits = self.classifier(fused)
         param_pred = self.param_head(fused)
