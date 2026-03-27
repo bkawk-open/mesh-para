@@ -736,6 +736,56 @@ def choose_strategy_with_stats(
     return ordered[0]
 
 
+def collect_status_snapshot(
+    project_dir: Path,
+    paths: dict[str, Path],
+    strategies: tuple[StrategyPreset, ...],
+    manager_history: list[dict[str, Any]],
+    artifact_root: str,
+    source_run: str,
+    remote_project_dir: str,
+    remote_audit_root: str,
+    audit_cache: str,
+    audit_timeout: int,
+    audit_max_regression: float,
+    tail_window: int,
+    preferred_strategy: str | None,
+) -> dict[str, Any]:
+    active = sorted(active_run_names())
+    audit_queue = load_audit_queue(paths["audit_queue"])
+    write_missing_retrospectives(project_dir, paths, manager_history, artifact_root)
+    retro_signals = load_retro_signals(paths["retros"])
+    cards = strategy_scorecards(project_dir, strategies, manager_history, artifact_root)
+    resolved = resolve_source_candidate(
+        project_dir,
+        paths,
+        artifact_root,
+        manager_history,
+        source_run,
+        remote_project_dir,
+        remote_audit_root,
+        audit_cache,
+        audit_timeout,
+        audit_max_regression,
+        False,
+        None,
+    )
+    history = load_run_history(project_dir, resolved["run_name"], artifact_root)
+    analysis = analyze_run(history, tail_window)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, preferred_strategy)
+    latest_launch = next((row for row in reversed(manager_history) if row.get("status") == "launched"), None)
+    return {
+        "active": active,
+        "audit_queue": audit_queue,
+        "resolved": resolved,
+        "analysis": analysis,
+        "strategy": strategy,
+        "latest_launch": latest_launch,
+        "cards": cards,
+        "retro_signals": retro_signals,
+    }
+
+
 def write_retrospective(
     project_dir: Path,
     retros_dir: Path,
@@ -1042,30 +1092,28 @@ def do_status(args: argparse.Namespace) -> None:
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
     strategies = load_strategies(project_dir, args.strategy_dir)
-    active = sorted(active_run_names())
-    audit_queue = load_audit_queue(paths["audit_queue"])
     manager_history = load_jsonl(paths["history"])
-    write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
-    retro_signals = load_retro_signals(paths["retros"])
-    cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
-    resolved = resolve_source_candidate(
+    snapshot = collect_status_snapshot(
         project_dir,
         paths,
-        args.artifact_root,
+        strategies,
         manager_history,
+        args.artifact_root,
         args.source_run,
         args.remote_project_dir,
         args.remote_audit_root,
         args.audit_cache,
         args.audit_timeout,
         args.audit_max_regression,
-        False,
-        None,
+        args.tail_window,
+        args.strategy,
     )
-    history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
-    analysis = analyze_run(history, args.tail_window)
-    strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
-    latest_launch = next((row for row in reversed(manager_history) if row.get("status") == "launched"), None)
+    active = snapshot["active"]
+    audit_queue = snapshot["audit_queue"]
+    resolved = snapshot["resolved"]
+    analysis = snapshot["analysis"]
+    strategy = snapshot["strategy"]
+    latest_launch = snapshot["latest_launch"]
 
     print(f"manager_name:    {args.manager_name}")
     print(f"source_run:      {args.source_run}")
@@ -1192,6 +1240,7 @@ def do_supervise(args: argparse.Namespace) -> None:
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
     log_path = paths["logs"] / f"{sanitize_name(args.supervisor_name)}.log"
+    strategies = load_strategies(project_dir, args.strategy_dir)
 
     iteration = 0
     while True:
@@ -1208,7 +1257,33 @@ def do_supervise(args: argparse.Namespace) -> None:
             active = sorted(active_run_names())
 
         if active:
-            message = f"[{timestamp}] idle=false active_runs={','.join(active)}"
+            snapshot = collect_status_snapshot(
+                project_dir,
+                paths,
+                strategies,
+                load_jsonl(paths["history"]),
+                args.artifact_root,
+                args.source_run,
+                args.remote_project_dir,
+                args.remote_audit_root,
+                args.audit_cache,
+                args.audit_timeout,
+                args.audit_max_regression,
+                args.tail_window,
+                args.strategy,
+            )
+            analysis = snapshot["analysis"]
+            resolved = snapshot["resolved"]
+            strategy = snapshot["strategy"]
+            message = (
+                f"[{timestamp}] idle=false "
+                f"active_runs={','.join(active)} "
+                f"best_run={resolved['run_name']} "
+                f"best_score={resolved['best_score']:.6f} "
+                f"queued_audits={len(snapshot['audit_queue'])} "
+                f"latest_status={analysis['latest'].get('status') if analysis['latest'] else 'none'} "
+                f"next_strategy={strategy.name}"
+            )
             log_line(log_path, message)
         else:
             audit_result = process_next_audit(
