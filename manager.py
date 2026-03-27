@@ -60,6 +60,13 @@ class StrategyStats:
     score: float = 0.0
 
 
+@dataclass(frozen=True)
+class RetroSignal:
+    run_name: str
+    strategy: str
+    recommendation: str
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -350,10 +357,52 @@ def strategy_scorecards(
     return cards
 
 
+def recommendation_for_run(delta: float, keepers: int, near_misses: int, errors: int) -> str:
+    if delta > 0.0 and keepers > 0:
+        return "continue"
+    if near_misses > 0 and errors == 0:
+        return "probe_nearby"
+    if errors >= 2:
+        return "reliability"
+    return "cool_down"
+
+
+def load_retro_signals(retros_dir: Path) -> dict[str, RetroSignal]:
+    if not retros_dir.exists():
+        return {}
+    signals: dict[str, RetroSignal] = {}
+    strategy_re = re.compile(r"^- Strategy: `([^`]+)`$")
+    recommendation_re = re.compile(r"^- Recommendation: `([^`]+)`$")
+    for path in sorted(retros_dir.glob("*.md")):
+        strategy = ""
+        recommendation = ""
+        for line in read_text(path).splitlines():
+            if not strategy:
+                match = strategy_re.match(line)
+                if match:
+                    strategy = match.group(1)
+                    continue
+            if not recommendation:
+                match = recommendation_re.match(line)
+                if match:
+                    recommendation = match.group(1)
+                    continue
+            if strategy and recommendation:
+                break
+        if strategy and recommendation:
+            signals[strategy] = RetroSignal(
+                run_name=path.stem,
+                strategy=strategy,
+                recommendation=recommendation,
+            )
+    return signals
+
+
 def choose_strategy_with_stats(
     strategies: tuple[StrategyPreset, ...],
     manager_history: list[dict[str, Any]],
     cards: dict[str, StrategyStats],
+    retro_signals: dict[str, RetroSignal],
     preferred: str | None = None,
 ) -> StrategyPreset:
     strategies_by_name = strategy_map(strategies)
@@ -369,10 +418,24 @@ def choose_strategy_with_stats(
     ]
     last_strategy = recent[0] if recent else None
 
+    def retro_adjustment(strategy_name: str) -> float:
+        signal = retro_signals.get(strategy_name)
+        if signal is None:
+            return 0.0
+        if signal.recommendation == "continue":
+            return 75.0
+        if signal.recommendation == "probe_nearby":
+            return 30.0
+        if signal.recommendation == "reliability":
+            return -60.0
+        if signal.recommendation == "cool_down":
+            return -120.0
+        return 0.0
+
     ordered = sorted(
         strategies,
         key=lambda strategy: (
-            cards[strategy.name].score,
+            cards[strategy.name].score + retro_adjustment(strategy.name),
             cards[strategy.name].avg_best_delta,
             -cards[strategy.name].launches,
         ),
@@ -383,7 +446,10 @@ def choose_strategy_with_stats(
     if last_strategy is None:
         return ordered[0]
     for strategy in ordered:
+        signal = retro_signals.get(strategy.name)
         if strategy.name != last_strategy:
+            return strategy
+        if signal is not None and signal.recommendation in {"continue", "probe_nearby"}:
             return strategy
     return ordered[0]
 
@@ -411,6 +477,7 @@ def write_retrospective(
     near_misses = [row for row in history if row.get("status") == "near_miss"]
     errors = [row for row in history if str(row.get("status", "")).endswith("error")]
     latest = history[-1]
+    recommendation = recommendation_for_run(delta, len(keepers), len(near_misses), len(errors))
     retros_dir.mkdir(parents=True, exist_ok=True)
     path = retros_dir / f"{sanitize_name(run_name)}.md"
     lines = [
@@ -426,6 +493,7 @@ def write_retrospective(
         f"- Near misses: `{len(near_misses)}`",
         f"- Errors: `{len(errors)}`",
         f"- Latest status: `{latest.get('status', '')}`",
+        f"- Recommendation: `{recommendation}`",
         "",
         "## Notes",
     ]
@@ -464,9 +532,6 @@ def write_missing_retrospectives(
             continue
         run_name = row.get("run_name")
         if not run_name:
-            continue
-        retro_path = paths["retros"] / f"{sanitize_name(run_name)}.md"
-        if retro_path.exists():
             continue
         write_retrospective(project_dir, paths["retros"], run_name, artifact_root, row)
 
@@ -589,11 +654,12 @@ def do_recommend(args: argparse.Namespace) -> None:
     strategies = load_strategies(project_dir, args.strategy_dir)
     manager_history = load_jsonl(paths["history"])
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
+    retro_signals = load_retro_signals(paths["retros"])
     cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
-    strategy = choose_strategy_with_stats(strategies, manager_history, cards, args.strategy)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
 
     print(f"source_run:      {args.source_run}")
     print(f"resolved_run:    {resolved['run_name']}")
@@ -613,9 +679,12 @@ def do_recommend(args: argparse.Namespace) -> None:
     print(f"description:     {strategy.description}")
     for name in [s.name for s in strategies]:
         card = cards[name]
+        signal = retro_signals.get(name)
+        recommendation = signal.recommendation if signal is not None else "none"
         print(
             f"strategy_{name}: launches={card.launches} improvements={card.improvements} "
-            f"near_misses={card.near_misses} errors={card.errors} avg_delta={card.avg_best_delta:.6f} score={card.score:.2f}"
+            f"near_misses={card.near_misses} errors={card.errors} avg_delta={card.avg_best_delta:.6f} "
+            f"score={card.score:.2f} recommendation={recommendation}"
         )
 
 
@@ -631,11 +700,12 @@ def do_launch_next(args: argparse.Namespace) -> None:
 
     manager_history = load_jsonl(paths["history"])
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
+    retro_signals = load_retro_signals(paths["retros"])
     cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
-    strategy = choose_strategy_with_stats(strategies, manager_history, cards, args.strategy)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
 
     best_train = resolved["best_train_path"]
     best_log = resolved["best_log"]
