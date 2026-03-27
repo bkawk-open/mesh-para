@@ -10,7 +10,7 @@ This repo does not solve full Mesh -> STEP today. It focuses on the stage-1 prob
 
 The repo pattern comes from Karpathy's [autoresearch reference clone](/Volumes/bkawk/projects/mesh-para/reference), which we used as the starting point for the one-file autonomous research loop design.
 
-Matthew Berman helped put `autoresearch` on our radar in the first place, which is what kicked off this direction for the project.
+@matthew_berman helped put `autoresearch` on our radar in the first place, which is what kicked off this direction for the project.
 
 ## Why this exists
 
