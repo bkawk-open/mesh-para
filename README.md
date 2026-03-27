@@ -84,6 +84,10 @@ If you want to run or operate the system:
 - [Workflow](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/workflow.md)
 - [Contributing](/Volumes/bkawk/projects/mesh-para/cadresearch/CONTRIBUTING.md)
 
+If you want standardized, commit-friendly summaries of wins and misses:
+
+- [Lab Notebook](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/lab_notebook)
+
 ## Quick start
 
 ```bash
@@ -116,6 +120,14 @@ python3 /Volumes/bkawk/projects/mesh-para/cadresearch/manager.py \
 ```
 
 For full operating details, use [Workflow](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/workflow.md).
+
+To publish a run into the shared-lab format:
+
+```bash
+python3 /Volumes/bkawk/projects/mesh-para/cadresearch/manager.py \
+  --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  publish --run-name <run-name>
+```
 
 ## Hardware
 

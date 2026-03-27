@@ -102,6 +102,7 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "retros": root / "retros",
         "audits": root / "audits",
         "workspaces": root / "workspaces",
+        "published": project_dir / "docs" / "lab_notebook",
     }
 
 
@@ -111,6 +112,7 @@ def ensure_manager_dirs(paths: dict[str, Path]) -> None:
     paths["audits"].mkdir(parents=True, exist_ok=True)
     paths["workspaces"].mkdir(parents=True, exist_ok=True)
     paths["hardware"].mkdir(parents=True, exist_ok=True)
+    paths["published"].mkdir(parents=True, exist_ok=True)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -1007,6 +1009,175 @@ def write_missing_retrospectives(
         write_retrospective(project_dir, paths["retros"], run_name, artifact_root, row)
 
 
+def classify_run_summary(
+    best_score: float,
+    source_best_score: float | None,
+    keepers: int,
+    near_misses: int,
+    errors: int,
+    audit: AuditResult | None,
+    active: bool,
+) -> str:
+    improved = source_best_score is not None and best_score > source_best_score + 1e-12
+    if active and improved:
+        return "winner_candidate"
+    if audit is not None and audit.status == "ok" and improved:
+        return "audited_winner"
+    if keepers > 0 and improved:
+        return "winner_candidate"
+    if near_misses > 0:
+        return "near_miss"
+    if errors > 0 and keepers == 0:
+        return "erroring_branch"
+    return "dead_end"
+
+
+def build_run_summary(
+    project_dir: Path,
+    paths: dict[str, Path],
+    artifact_root: str,
+    manager_history: list[dict[str, Any]],
+    run_name: str,
+) -> dict[str, Any]:
+    layout = build_layout(project_dir, run_name, artifact_root)
+    state = load_state(layout)
+    if state is None:
+        raise SystemExit(f"Run state not found for {run_name}")
+    history = load_run_history(project_dir, run_name, artifact_root)
+    if not history:
+        raise SystemExit(f"Run history not found for {run_name}")
+    seed = history[0]
+    best_score = float(state["best_score"])
+    source_best_score = float(seed.get("val_score", best_score)) if seed else None
+    best_iteration = int(state.get("best_iteration", 0))
+    best_row = next((row for row in history if int(row.get("iteration", -1)) == best_iteration), history[-1])
+    keepers = [row for row in history if row.get("status") == "keep"]
+    near_misses = [row for row in history if row.get("status") == "near_miss"]
+    errors = [row for row in history if str(row.get("status", "")).endswith("error")]
+    active = run_name in active_run_names()
+    manager_row = next((row for row in reversed(manager_history) if row.get("run_name") == run_name and row.get("status") == "launched"), None)
+    audit = cached_audit_result(paths, run_name, resolve_state_path(str(state["best_train_path"]), project_dir))
+    hardware = load_hardware_profile(paths["hardware_latest"])
+    classification = classify_run_summary(
+        best_score,
+        source_best_score,
+        len(keepers),
+        len(near_misses),
+        len(errors),
+        audit,
+        active,
+    )
+    return {
+        "run_name": run_name,
+        "classification": classification,
+        "active": active,
+        "strategy": manager_row.get("strategy", "") if manager_row else "",
+        "strategy_description": manager_row.get("strategy_description", "") if manager_row else "",
+        "strategy_dir": manager_row.get("strategy_dir", "") if manager_row else "",
+        "source_run": manager_row.get("resolved_source_run", manager_row.get("source_run", "")) if manager_row else "",
+        "source_best_score": source_best_score,
+        "best_iteration": best_iteration,
+        "best_score": best_score,
+        "delta_vs_source": (best_score - source_best_score) if source_best_score is not None else None,
+        "best_metrics": dict(state.get("best_metrics", {})),
+        "latest_status": history[-1].get("status", ""),
+        "iterations_completed": int(state.get("iterations_completed", 0)),
+        "keeper_count": len(keepers),
+        "near_miss_count": len(near_misses),
+        "error_count": len(errors),
+        "best_log": str(state.get("best_log", "")),
+        "best_train_path": str(state.get("best_train_path", "")),
+        "best_train_sha256": str(state.get("best_train_sha256", "")),
+        "run_history_path": str(layout.history_path.relative_to(project_dir)),
+        "state_path": str(layout.state_path.relative_to(project_dir)),
+        "manager_timestamp": manager_row.get("timestamp", "") if manager_row else "",
+        "audit": None
+        if audit is None
+        else {
+            "status": audit.status,
+            "score": audit.score,
+            "log_path": audit.log_path,
+            "train_hash": audit.train_hash,
+        },
+        "hardware": hardware,
+        "notes": [
+            "winner confirmed within run" if keepers else "no keeper yet",
+            "still active" if active else "run finished",
+        ],
+        "best_row": best_row,
+    }
+
+
+def publish_run_summary(
+    project_dir: Path,
+    paths: dict[str, Path],
+    artifact_root: str,
+    manager_history: list[dict[str, Any]],
+    run_name: str,
+) -> tuple[Path, Path]:
+    summary = build_run_summary(project_dir, paths, artifact_root, manager_history, run_name)
+    stem = sanitize_name(run_name)
+    json_path = paths["published"] / f"{stem}.json"
+    md_path = paths["published"] / f"{stem}.md"
+    write_text(json_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
+
+    lines = [
+        f"# Run Summary: {run_name}",
+        "",
+        f"- Classification: `{summary['classification']}`",
+        f"- Active: `{summary['active']}`",
+        f"- Strategy: `{summary['strategy']}`",
+        f"- Source run: `{summary['source_run']}`",
+        f"- Source score: `{summary['source_best_score']:.6f}`" if summary["source_best_score"] is not None else "- Source score: `unknown`",
+        f"- Best score: `{summary['best_score']:.6f}`",
+        f"- Delta vs source: `{summary['delta_vs_source']:.6f}`" if summary["delta_vs_source"] is not None else "- Delta vs source: `unknown`",
+        f"- Best iteration: `{summary['best_iteration']}`",
+        f"- Latest status: `{summary['latest_status']}`",
+        f"- Iterations completed: `{summary['iterations_completed']}`",
+        f"- Keepers: `{summary['keeper_count']}`",
+        f"- Near misses: `{summary['near_miss_count']}`",
+        f"- Errors: `{summary['error_count']}`",
+    ]
+    audit = summary["audit"]
+    if audit is not None:
+        lines.append(f"- Audit: `{audit['status']}` score=`{audit['score']}`")
+    hardware = summary["hardware"]
+    if hardware and hardware.get("status") == "ok":
+        lines.extend(
+            [
+                "",
+                "## Hardware",
+                f"- Host: `{hardware.get('host', '')}`",
+                f"- Profile tier: `{hardware.get('profile_tier', '')}`",
+                f"- GPU count: `{hardware.get('gpu_count', 0)}`",
+            ]
+        )
+        for gpu in hardware.get("gpus", []):
+            lines.append(
+                f"- GPU: `{gpu.get('name', '')}` memory_mb=`{gpu.get('memory_mb', 0)}` driver=`{gpu.get('driver_version', '')}`"
+            )
+    metrics = summary["best_metrics"]
+    if metrics:
+        lines.extend(
+            [
+                "",
+                "## Best Metrics",
+                *(f"- {key}: `{value}`" for key, value in sorted(metrics.items())),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Links",
+            f"- State: [{summary['state_path']}]({project_dir / summary['state_path']})",
+            f"- History: [{summary['run_history_path']}]({project_dir / summary['run_history_path']})",
+            f"- JSON summary: [{json_path.name}]({json_path})",
+        ]
+    )
+    write_text(md_path, "\n".join(lines) + "\n")
+    return json_path, md_path
+
+
 def resolve_source_candidate(
     project_dir: Path,
     paths: dict[str, Path],
@@ -1562,6 +1733,22 @@ def do_hardware(args: argparse.Namespace) -> None:
         )
 
 
+def do_publish(args: argparse.Namespace) -> None:
+    project_dir = Path(args.project_dir).resolve()
+    paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    ensure_manager_dirs(paths)
+    manager_history = load_jsonl(paths["history"])
+    json_path, md_path = publish_run_summary(
+        project_dir,
+        paths,
+        args.artifact_root,
+        manager_history,
+        args.run_name,
+    )
+    print(f"published_json:  {json_path}")
+    print(f"published_md:    {md_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lab-manager for autonomous mesh-para runs.")
     parser.add_argument("--project-dir", default=".", help="Path to the mesh-para project.")
@@ -1589,6 +1776,10 @@ def build_parser() -> argparse.ArgumentParser:
     hardware.add_argument("--expanded-strategy-dir", default=DEFAULT_EXPANDED_STRATEGY_DIR, help="Expanded strategy directory to recommend when the hardware profile is strong enough.")
     hardware.add_argument("--cached-only", action="store_true", help="Print the cached hardware profile without refreshing it.")
     hardware.set_defaults(func=do_hardware)
+
+    publish = subparsers.add_parser("publish", help="Export one run into a standard, commit-friendly shared-lab summary.")
+    publish.add_argument("--run-name", required=True, help="Run to publish.")
+    publish.set_defaults(func=do_publish)
 
     recommend = subparsers.add_parser("recommend", parents=[common], help="Suggest the next strategy for a source run.")
     recommend.add_argument("--allow-live-audits", action="store_true", help="Allow recommend to refresh missing audits even when research runs are active.")

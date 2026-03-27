@@ -94,6 +94,16 @@ A strong PR usually has:
 - hardware context
 - a short plain-English explanation
 
+If possible, generate a standardized summary first:
+
+```bash
+python3 /Volumes/bkawk/projects/mesh-para/cadresearch/manager.py \
+  --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  publish --run-name <run-name>
+```
+
+That writes a normalized markdown and JSON summary under [docs/lab_notebook](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/lab_notebook).
+
 The easiest PRs to review are the ones that make it obvious whether the contribution is:
 
 - a new best result
