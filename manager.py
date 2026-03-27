@@ -1037,6 +1037,62 @@ def do_recommend(args: argparse.Namespace) -> None:
         )
 
 
+def do_status(args: argparse.Namespace) -> None:
+    project_dir = Path(args.project_dir).resolve()
+    paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    ensure_manager_dirs(paths)
+    strategies = load_strategies(project_dir, args.strategy_dir)
+    active = sorted(active_run_names())
+    audit_queue = load_audit_queue(paths["audit_queue"])
+    manager_history = load_jsonl(paths["history"])
+    write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
+    retro_signals = load_retro_signals(paths["retros"])
+    cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
+    resolved = resolve_source_candidate(
+        project_dir,
+        paths,
+        args.artifact_root,
+        manager_history,
+        args.source_run,
+        args.remote_project_dir,
+        args.remote_audit_root,
+        args.audit_cache,
+        args.audit_timeout,
+        args.audit_max_regression,
+        False,
+        None,
+    )
+    history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
+    analysis = analyze_run(history, args.tail_window)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
+    latest_launch = next((row for row in reversed(manager_history) if row.get("status") == "launched"), None)
+
+    print(f"manager_name:    {args.manager_name}")
+    print(f"source_run:      {args.source_run}")
+    print(f"active_runs:     {','.join(active) if active else 'none'}")
+    print(f"queued_audits:   {len(audit_queue)}")
+    print(f"resolved_run:    {resolved['run_name']}")
+    print(f"resolved_score:  {resolved['best_score']:.6f}")
+    audit = resolved.get("audit")
+    print(
+        "resolved_audit:  "
+        + (f"{audit.status} {format(audit.score, '.6f') if audit.score is not None else 'NA'}" if audit is not None else "missing")
+    )
+    print(f"iterations_done: {analysis['completed']}")
+    print(f"plateaued:       {analysis['plateaued']}")
+    if analysis["latest"] is not None:
+        latest = analysis["latest"]
+        print(f"latest_status:   {latest.get('status')}")
+        if "val_score" in latest:
+            print(f"latest_score:    {float(latest['val_score']):.6f}")
+    print(f"next_strategy:   {strategy.name}")
+    print(f"next_desc:       {strategy.description}")
+    if latest_launch is not None:
+        print(f"last_launch:     {latest_launch.get('run_name', '')}")
+        print(f"last_strategy:   {latest_launch.get('strategy', '')}")
+        print(f"last_timestamp:  {latest_launch.get('timestamp', '')}")
+
+
 def do_launch_next(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
@@ -1209,6 +1265,9 @@ def build_parser() -> argparse.ArgumentParser:
     recommend = subparsers.add_parser("recommend", parents=[common], help="Suggest the next strategy for a source run.")
     recommend.add_argument("--allow-live-audits", action="store_true", help="Allow recommend to refresh missing audits even when research runs are active.")
     recommend.set_defaults(func=do_recommend)
+
+    status = subparsers.add_parser("status", parents=[common], help="Show the current lab state without mutating queues or launching audits.")
+    status.set_defaults(func=do_status)
 
     launch = subparsers.add_parser("launch-next", parents=[common], help="Promote the best baseline and launch the next run.")
     launch.add_argument("--run-name", default=None, help="Optional explicit run name.")
