@@ -153,6 +153,46 @@ def active_run_names() -> set[str]:
     return names
 
 
+def log_line(path: Path, message: str) -> None:
+    print(message, flush=True)
+
+
+def run_layout_for(project_dir: Path, artifact_root: str, run_name: str):
+    return build_layout(project_dir, run_name, artifact_root)
+
+
+def run_last_progress_timestamp(project_dir: Path, artifact_root: str, run_name: str) -> float | None:
+    layout = run_layout_for(project_dir, artifact_root, run_name)
+    candidates = []
+    for path in (layout.history_path, layout.state_path):
+        if path.exists():
+            candidates.append(path.stat().st_mtime)
+    return max(candidates) if candidates else None
+
+
+def stop_run_process(run_name: str) -> None:
+    session_name = sanitize_name(run_name)
+    subprocess.run(["screen", "-S", session_name, "-X", "quit"], text=True, capture_output=True)
+    subprocess.run(
+        ["pkill", "-f", f"research.py loop --run-name {run_name}"],
+        text=True,
+        capture_output=True,
+    )
+
+
+def detect_stale_runs(project_dir: Path, artifact_root: str, active_runs: list[str], stale_seconds: int) -> list[dict[str, Any]]:
+    now = time.time()
+    stale: list[dict[str, Any]] = []
+    for run_name in active_runs:
+        last_progress = run_last_progress_timestamp(project_dir, artifact_root, run_name)
+        if last_progress is None:
+            continue
+        age = now - last_progress
+        if age >= stale_seconds:
+            stale.append({"run_name": run_name, "age_seconds": age})
+    return stale
+
+
 def analyze_run(history: list[dict[str, Any]], tail_window: int) -> dict[str, Any]:
     nonseed = [row for row in history if row.get("iteration", 0) > 0]
     tail = nonseed[-tail_window:]
@@ -436,16 +476,21 @@ def do_supervise(args: argparse.Namespace) -> None:
         iteration += 1
         timestamp = utc_now()
         active = sorted(active_run_names())
+        stale_runs = detect_stale_runs(project_dir, args.artifact_root, active, args.stale_seconds) if active else []
+        if stale_runs:
+            for stale in stale_runs:
+                run_name = stale["run_name"]
+                age = stale["age_seconds"]
+                log_line(log_path, f"[{timestamp}] stale_run run={run_name} age_seconds={age:.0f} action=stop")
+                stop_run_process(run_name)
+            active = sorted(active_run_names())
+
         if active:
             message = f"[{timestamp}] idle=false active_runs={','.join(active)}"
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(message + "\n")
-            print(message, flush=True)
+            log_line(log_path, message)
         else:
             message = f"[{timestamp}] idle=true launching_next"
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(message + "\n")
-            print(message, flush=True)
+            log_line(log_path, message)
             launch_args = argparse.Namespace(**vars(args))
             launch_args.dry_run = False
             launch_args.require_idle = False
@@ -497,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--agent-model", default=None, help="Optional model override for the agent CLI.")
     supervise.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
     supervise.add_argument("--dataset-cache", default=DEFAULT_DATASET_CACHE, help="Remote cache dir used by train.py.")
+    supervise.add_argument("--stale-seconds", type=int, default=1800, help="Kill and replace active runs that show no progress for this many seconds.")
     supervise.add_argument("--once", action="store_true", help="Run a single supervisor check cycle and exit.")
     supervise.set_defaults(func=do_supervise)
 

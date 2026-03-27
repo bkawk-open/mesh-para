@@ -28,6 +28,7 @@ from typing import Any
 METRIC_RE = re.compile(r"^([a-z_]+):\s+([-+]?[0-9]*\.?[0-9]+)$", re.MULTILINE)
 DEFAULT_RUN_NAME = "default"
 DEFAULT_ARTIFACT_ROOT = "artifacts/autoresearch"
+TIMEOUT_EXIT_CODE = 124
 
 
 @dataclass
@@ -139,21 +140,45 @@ def py_compile_file(path: Path) -> None:
     subprocess.run([sys.executable, "-m", "py_compile", str(path)], check=True)
 
 
-def run_shell(command: str, cwd: Path, log_path: Path | None = None) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        command,
-        cwd=str(cwd),
-        shell=True,
-        text=True,
-        capture_output=True,
-    )
+def format_command_log(command: str, stdout: str, stderr: str, timed_out: float | None = None) -> str:
+    combined = f"$ {command}\n"
+    if timed_out is not None:
+        combined += f"[timeout after {timed_out:.1f}s]\n"
+    if stdout:
+        combined += stdout
+    if stderr:
+        combined += ("\n" if stdout else "") + stderr
+    return combined
+
+
+def run_shell(
+    command: str,
+    cwd: Path,
+    log_path: Path | None = None,
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd),
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+        timed_out = None
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        result = subprocess.CompletedProcess(
+            args=command,
+            returncode=TIMEOUT_EXIT_CODE,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        timed_out = float(timeout_seconds) if timeout_seconds is not None else None
     if log_path is not None:
-        combined = f"$ {command}\n"
-        if result.stdout:
-            combined += result.stdout
-        if result.stderr:
-            combined += ("\n" if result.stdout else "") + result.stderr
-        write_text(log_path, combined)
+        write_text(log_path, format_command_log(command, result.stdout or "", result.stderr or "", timed_out=timed_out))
     return result
 
 
@@ -299,21 +324,9 @@ def run_training(
     project_dir: Path,
     train_command: str,
     train_log_path: Path,
+    timeout_seconds: int | None,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        train_command,
-        cwd=str(project_dir),
-        shell=True,
-        text=True,
-        capture_output=True,
-    )
-    combined = f"$ {train_command}\n"
-    if result.stdout:
-        combined += result.stdout
-    if result.stderr:
-        combined += ("\n" if result.stdout else "") + result.stderr
-    write_text(train_log_path, combined)
-    return result
+    return run_shell(train_command, project_dir, train_log_path, timeout_seconds=timeout_seconds)
 
 
 def run_loop(args: argparse.Namespace) -> None:
@@ -399,11 +412,19 @@ def run_loop(args: argparse.Namespace) -> None:
             continue
 
         if args.pre_train_command:
-            pre_result = run_shell(args.pre_train_command, project_dir, layout.logs_dir / f"iter_{iteration:04d}_pretrain.log")
+            pre_result = run_shell(
+                args.pre_train_command,
+                project_dir,
+                layout.logs_dir / f"iter_{iteration:04d}_pretrain.log",
+                timeout_seconds=args.pre_train_timeout,
+            )
             if pre_result.returncode != 0:
                 write_text(train_path, best_train_text)
                 record["status"] = "sync_error"
-                record["notes"] = f"pre-train command exited {pre_result.returncode}"
+                if pre_result.returncode == TIMEOUT_EXIT_CODE:
+                    record["notes"] = f"pre-train command timed out after {args.pre_train_timeout}s"
+                else:
+                    record["notes"] = f"pre-train command exited {pre_result.returncode}"
                 append_history(layout, record)
                 append_leaderboard(layout, record)
                 state["iterations_completed"] = iteration
@@ -411,16 +432,19 @@ def run_loop(args: argparse.Namespace) -> None:
                 save_state(layout, state)
                 continue
 
-        train_result = run_training(project_dir, args.train_command, train_log_path)
+        train_result = run_training(project_dir, args.train_command, train_log_path, timeout_seconds=args.train_timeout)
         train_metrics = parse_metrics(read_text(train_log_path))
         record.update(train_metrics)
 
         if train_result.returncode != 0 or "val_score" not in train_metrics:
             write_text(train_path, best_train_text)
             record["status"] = "train_error"
-            record["notes"] = (
-                f"train exited {train_result.returncode}" if train_result.returncode != 0 else "val_score missing from train log"
-            )
+            if train_result.returncode == TIMEOUT_EXIT_CODE:
+                record["notes"] = f"train timed out after {args.train_timeout}s"
+            else:
+                record["notes"] = (
+                    f"train exited {train_result.returncode}" if train_result.returncode != 0 else "val_score missing from train log"
+                )
             append_history(layout, record)
             append_leaderboard(layout, record)
             state["iterations_completed"] = iteration
@@ -513,7 +537,9 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser.add_argument("--agent-prompt-extra", default="", help="Extra instruction appended to the agent prompt.")
     loop_parser.add_argument("--baseline-log", default=None, help="Optional log to seed the run if state is missing.")
     loop_parser.add_argument("--pre-train-command", default="", help="Optional shell command to run before training, e.g. syncing train.py to a server.")
+    loop_parser.add_argument("--pre-train-timeout", type=int, default=120, help="Timeout in seconds for the optional pre-train sync command.")
     loop_parser.add_argument("--train-command", required=True, help="Shell command that runs train.py and prints metrics to stdout.")
+    loop_parser.add_argument("--train-timeout", type=int, default=900, help="Timeout in seconds for the training command.")
     loop_parser.add_argument("--min-improvement", type=float, default=0.0, help="Minimum required improvement over the current best.")
     loop_parser.set_defaults(func=run_loop)
 
