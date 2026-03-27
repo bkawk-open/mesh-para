@@ -101,6 +101,11 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
+        self.boundary_fusion = nn.Sequential(
+            nn.Linear(fused_dim + 1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2),
+        )
 
     def forward(
         self,
@@ -127,14 +132,15 @@ class LocalPointModel(nn.Module):
         global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
-        # Let the boundary signal bias downstream predictions toward local evidence near edges
-        # while preserving more global context on interior points.
-        boundary_prob = torch.sigmoid(boundary_logits).unsqueeze(-1).detach()
+        boundary_context = torch.cat([fused, boundary_logits.unsqueeze(-1)], dim=-1)
+        fusion_gates = torch.sigmoid(self.boundary_fusion(boundary_context))
+        local_gate = 1.0 + fusion_gates[..., :1]
+        global_gate = 1.0 + fusion_gates[..., 1:2]
         task_fused = torch.cat(
             [
                 point_feat,
-                local_feat * (1.0 + boundary_prob),
-                global_feat * (1.0 - boundary_prob),
+                local_feat * local_gate,
+                global_feat * global_gate,
             ],
             dim=-1,
         )

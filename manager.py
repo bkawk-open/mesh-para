@@ -44,6 +44,20 @@ class StrategyPreset:
     iterations: int = 16
 
 
+@dataclass
+class StrategyStats:
+    name: str
+    launches: int = 0
+    improvements: int = 0
+    near_misses: int = 0
+    confirm_reverts: int = 0
+    errors: int = 0
+    avg_best_delta: float = 0.0
+    last_run_name: str = ""
+    last_timestamp: str = ""
+    score: float = 0.0
+
+
 STRATEGIES: tuple[StrategyPreset, ...] = (
     StrategyPreset(
         name="boundary_calibration",
@@ -227,20 +241,7 @@ def choose_strategy(manager_history: list[dict[str, Any]], preferred: str | None
         if preferred not in strategies:
             raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies)}")
         return strategies[preferred]
-
-    recent = [
-        row.get("strategy")
-        for row in reversed(manager_history)
-        if row.get("strategy") and row.get("status") == "launched"
-    ]
-    last_strategy = recent[0] if recent else None
-    ordered = list(STRATEGIES)
-    if last_strategy is None:
-        return ordered[0]
-    for strategy in ordered:
-        if strategy.name != last_strategy:
-            return strategy
-    return ordered[0]
+    raise RuntimeError("choose_strategy requires scorecards; use choose_strategy_with_stats")
 
 
 def build_run_name(source_run: str, strategy: StrategyPreset, stamp: str | None = None) -> str:
@@ -248,13 +249,31 @@ def build_run_name(source_run: str, strategy: StrategyPreset, stamp: str | None 
     return sanitize_name(f"{source_run}_{strategy.name}_{stamp}")
 
 
-def best_paths_for_run(project_dir: Path, run_name: str, artifact_root: str) -> tuple[Path, Path, dict[str, Any]]:
+def resolve_state_path(path_value: str, *bases: Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    for base in bases:
+        candidate = (base / path).resolve()
+        if candidate.exists():
+            return candidate
+    return (bases[0] / path).resolve()
+
+
+def best_paths_for_run(
+    project_dir: Path,
+    run_name: str,
+    artifact_root: str,
+    workspace_dir: Path | None = None,
+) -> tuple[Path, Path, dict[str, Any]]:
     layout = build_layout(project_dir, run_name, artifact_root)
     state = load_state(layout)
     if state is None:
         raise SystemExit(f"No state found for run {run_name!r} in {layout.run_dir}")
-    best_train = project_dir / state["best_train_path"]
-    best_log = project_dir / state["best_log"]
+    bases = [workspace_dir] if workspace_dir is not None else []
+    bases.append(project_dir)
+    best_train = resolve_state_path(state["best_train_path"], *bases)
+    best_log = resolve_state_path(state["best_log"], *bases)
     return best_train, best_log, state
 
 
@@ -266,8 +285,11 @@ def completed_manager_runs(project_dir: Path, manager_history: list[dict[str, An
         if not run_name or run_name in seen or row.get("status") != "launched":
             continue
         seen.add(run_name)
+        workspace_dir = None
+        if row.get("workspace_dir"):
+            workspace_dir = (project_dir / str(row["workspace_dir"])).resolve()
         try:
-            _, best_log, state = best_paths_for_run(project_dir, run_name, artifact_root)
+            best_train, best_log, state = best_paths_for_run(project_dir, run_name, artifact_root, workspace_dir=workspace_dir)
         except SystemExit:
             continue
         completed.append(
@@ -275,13 +297,103 @@ def completed_manager_runs(project_dir: Path, manager_history: list[dict[str, An
                 "run_name": run_name,
                 "best_score": float(state["best_score"]),
                 "best_log": best_log,
-                "best_train_path": project_dir / state["best_train_path"],
+                "best_train_path": best_train,
                 "state": state,
                 "strategy": row.get("strategy", ""),
                 "timestamp": row.get("timestamp", ""),
             }
         )
     return completed
+
+
+def strategy_scorecards(project_dir: Path, manager_history: list[dict[str, Any]], artifact_root: str) -> dict[str, StrategyStats]:
+    cards = {strategy.name: StrategyStats(name=strategy.name) for strategy in STRATEGIES}
+    for row in manager_history:
+        if row.get("status") != "launched":
+            continue
+        strategy_name = row.get("strategy")
+        run_name = row.get("run_name")
+        if not strategy_name or strategy_name not in cards or not run_name:
+            continue
+        card = cards[strategy_name]
+        card.launches += 1
+        card.last_run_name = run_name
+        card.last_timestamp = row.get("timestamp", "")
+        source_best = float(row.get("source_best_score", 0.0))
+
+        try:
+            layout = build_layout(project_dir, run_name, artifact_root)
+            state = load_state(layout)
+            history = load_run_history(project_dir, run_name, artifact_root)
+        except SystemExit:
+            continue
+        if state is None:
+            continue
+
+        best_delta = float(state["best_score"]) - source_best
+        prev_count = max(card.launches - 1, 0)
+        card.avg_best_delta = ((card.avg_best_delta * prev_count) + best_delta) / card.launches
+        if best_delta > 1e-12:
+            card.improvements += 1
+
+        for item in history:
+            status = item.get("status")
+            if status == "near_miss":
+                card.near_misses += 1
+            elif status == "confirm_revert":
+                card.confirm_reverts += 1
+            elif status in {"train_error", "sync_error", "compile_error", "agent_error", "confirm_error"}:
+                card.errors += 1
+
+    for card in cards.values():
+        if card.launches == 0:
+            card.score = 1000.0
+            continue
+        card.score = (
+            (200.0 * card.improvements)
+            + (25.0 * card.near_misses)
+            + (1000.0 * card.avg_best_delta)
+            - (15.0 * card.confirm_reverts)
+            - (10.0 * card.errors)
+        )
+    return cards
+
+
+def choose_strategy_with_stats(
+    manager_history: list[dict[str, Any]],
+    cards: dict[str, StrategyStats],
+    preferred: str | None = None,
+) -> StrategyPreset:
+    strategies = strategy_map()
+    if preferred:
+        if preferred not in strategies:
+            raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies)}")
+        return strategies[preferred]
+
+    recent = [
+        row.get("strategy")
+        for row in reversed(manager_history)
+        if row.get("strategy") and row.get("status") == "launched"
+    ]
+    last_strategy = recent[0] if recent else None
+
+    ordered = sorted(
+        STRATEGIES,
+        key=lambda strategy: (
+            cards[strategy.name].score,
+            cards[strategy.name].avg_best_delta,
+            -cards[strategy.name].launches,
+        ),
+        reverse=True,
+    )
+    if not ordered:
+        return STRATEGIES[0]
+    if last_strategy is None:
+        return ordered[0]
+    for strategy in ordered:
+        if strategy.name != last_strategy:
+            return strategy
+    return ordered[0]
 
 
 def resolve_source_candidate(
@@ -399,10 +511,11 @@ def do_recommend(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     manager_history = load_jsonl(paths["history"])
+    cards = strategy_scorecards(project_dir, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
-    strategy = choose_strategy(manager_history, args.strategy)
+    strategy = choose_strategy_with_stats(manager_history, cards, args.strategy)
 
     print(f"source_run:      {args.source_run}")
     print(f"resolved_run:    {resolved['run_name']}")
@@ -420,6 +533,12 @@ def do_recommend(args: argparse.Namespace) -> None:
             print(f"latest_score:    {float(latest['val_score']):.6f}")
     print(f"next_strategy:   {strategy.name}")
     print(f"description:     {strategy.description}")
+    for name in [s.name for s in STRATEGIES]:
+        card = cards[name]
+        print(
+            f"strategy_{name}: launches={card.launches} improvements={card.improvements} "
+            f"near_misses={card.near_misses} errors={card.errors} avg_delta={card.avg_best_delta:.6f} score={card.score:.2f}"
+        )
 
 
 def do_launch_next(args: argparse.Namespace) -> None:
@@ -432,10 +551,11 @@ def do_launch_next(args: argparse.Namespace) -> None:
         raise SystemExit(f"Active research runs detected: {', '.join(sorted(active))}")
 
     manager_history = load_jsonl(paths["history"])
+    cards = strategy_scorecards(project_dir, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
-    strategy = choose_strategy(manager_history, args.strategy)
+    strategy = choose_strategy_with_stats(manager_history, cards, args.strategy)
 
     best_train = resolved["best_train_path"]
     best_log = resolved["best_log"]
@@ -466,6 +586,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         "source_plateaued": analysis["plateaued"],
         "strategy": strategy.name,
         "strategy_description": strategy.description,
+        "strategy_score": cards[strategy.name].score,
         "run_name": run_name,
         "workspace_dir": str(workspace_dir.relative_to(project_dir)),
         "command": command,
