@@ -12,6 +12,7 @@ cannot answer by itself:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from research import build_layout, load_state, read_text, write_text
+from research import build_layout, load_state, parse_metrics, read_text, run_shell, write_text
 
 
 DEFAULT_AUTORESEARCH_ROOT = "artifacts/autoresearch"
@@ -33,6 +34,8 @@ DEFAULT_MANAGER_NAME = "default"
 DEFAULT_STRATEGY_DIR = "strategies"
 DEFAULT_REMOTE_PROJECT_DIR = "/data/projects/mesh-para/cadresearch"
 DEFAULT_DATASET_CACHE = "/data/projects/mesh-para/cadresearch/artifacts/abc_cache_512_boundary"
+DEFAULT_AUDIT_CACHE = "/data/projects/mesh-para/cadresearch/artifacts/abc_cache_2048"
+DEFAULT_REMOTE_AUDIT_ROOT = "/data/projects/mesh-para/cadresearch/artifacts/manager/default/audit_workspaces"
 ACTIVE_RUN_PATTERN = re.compile(r"research\.py loop --run-name ([A-Za-z0-9_.-]+)")
 
 
@@ -67,6 +70,16 @@ class RetroSignal:
     recommendation: str
 
 
+@dataclass(frozen=True)
+class AuditResult:
+    run_name: str
+    status: str
+    score: float | None
+    metrics: dict[str, float]
+    log_path: str
+    train_hash: str
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -83,6 +96,7 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "state": root / "state.json",
         "logs": root / "logs",
         "retros": root / "retros",
+        "audits": root / "audits",
         "workspaces": root / "workspaces",
     }
 
@@ -90,6 +104,7 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
 def ensure_manager_dirs(paths: dict[str, Path]) -> None:
     paths["logs"].mkdir(parents=True, exist_ok=True)
     paths["retros"].mkdir(parents=True, exist_ok=True)
+    paths["audits"].mkdir(parents=True, exist_ok=True)
     paths["workspaces"].mkdir(parents=True, exist_ok=True)
 
 
@@ -97,6 +112,10 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(read_text(path).encode("utf-8")).hexdigest()
 
 
 def save_json(path: Path, payload: dict[str, Any]) -> None:
@@ -297,6 +316,165 @@ def completed_manager_runs(project_dir: Path, manager_history: list[dict[str, An
             }
         )
     return completed
+
+
+def load_audit_result(audit_json_path: Path) -> AuditResult | None:
+    if not audit_json_path.exists():
+        return None
+    payload = json.loads(read_text(audit_json_path))
+    return AuditResult(
+        run_name=str(payload.get("run_name", "")),
+        status=str(payload.get("status", "")),
+        score=float(payload["score"]) if payload.get("score") is not None else None,
+        metrics=dict(payload.get("metrics", {})),
+        log_path=str(payload.get("log_path", "")),
+        train_hash=str(payload.get("train_hash", "")),
+    )
+
+
+def audit_paths_for(paths: dict[str, Path], run_name: str) -> dict[str, Path]:
+    stem = sanitize_name(run_name)
+    return {
+        "json": paths["audits"] / f"{stem}.json",
+        "sync_log": paths["audits"] / f"{stem}.sync.log",
+        "train_log": paths["audits"] / f"{stem}.train.log",
+        "workspace": paths["audits"] / f"{stem}_workspace",
+    }
+
+
+def ensure_audit_result(
+    project_dir: Path,
+    paths: dict[str, Path],
+    run_name: str,
+    best_train_path: Path,
+    remote_project_dir: str,
+    remote_audit_root: str,
+    audit_cache: str,
+    audit_timeout: int,
+) -> AuditResult:
+    audit_paths = audit_paths_for(paths, run_name)
+    train_hash = file_sha256(best_train_path)
+    cached = load_audit_result(audit_paths["json"])
+    if cached is not None and cached.train_hash == train_hash:
+        return cached
+
+    workspace = audit_paths["workspace"]
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best_train_path, workspace / "train.py")
+
+    remote_workspace = f"{remote_audit_root.rstrip('/')}/{sanitize_name(run_name)}"
+    remote_prepare = f"{remote_project_dir.rstrip('/')}/prepare.py"
+    prepare_cmd = (
+        "ssh bkawk.local "
+        f"\"rm -rf {shlex.quote(remote_workspace)} && "
+        f"mkdir -p {shlex.quote(remote_workspace)} && "
+        f"ln -s {shlex.quote(remote_prepare)} {shlex.quote(remote_workspace)}/prepare.py\""
+    )
+    prepare_result = run_shell(prepare_cmd, workspace, log_path=audit_paths["sync_log"], timeout_seconds=120)
+    if prepare_result.returncode != 0:
+        result = AuditResult(
+            run_name=run_name,
+            status="sync_error",
+            score=None,
+            metrics={},
+            log_path=str(audit_paths["sync_log"].relative_to(project_dir)),
+            train_hash=train_hash,
+        )
+        write_text(
+            audit_paths["json"],
+            json.dumps(
+                {
+                    "run_name": result.run_name,
+                    "status": result.status,
+                    "score": result.score,
+                    "metrics": result.metrics,
+                    "log_path": result.log_path,
+                    "train_hash": result.train_hash,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        return result
+
+    sync_cmd = f"scp train.py bkawk.local:{remote_workspace}/train.py"
+    sync_result = run_shell(sync_cmd, workspace, log_path=audit_paths["sync_log"], timeout_seconds=120)
+    if sync_result.returncode != 0:
+        result = AuditResult(
+            run_name=run_name,
+            status="sync_error",
+            score=None,
+            metrics={},
+            log_path=str(audit_paths["sync_log"].relative_to(project_dir)),
+            train_hash=train_hash,
+        )
+        write_text(
+            audit_paths["json"],
+            json.dumps(
+                {
+                    "run_name": result.run_name,
+                    "status": result.status,
+                    "score": result.score,
+                    "metrics": result.metrics,
+                    "log_path": result.log_path,
+                    "train_hash": result.train_hash,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        return result
+
+    train_cmd = (
+        "ssh bkawk.local "
+        f"'cd {remote_workspace} && CADRESEARCH_CACHE_DIR={audit_cache} PYTHONUNBUFFERED=1 python3 train.py'"
+    )
+    train_result = run_shell(train_cmd, workspace, log_path=audit_paths["train_log"], timeout_seconds=audit_timeout)
+    train_output = f"{train_result.stdout or ''}\n{train_result.stderr or ''}"
+    metrics = parse_metrics(train_output)
+    status = "ok" if train_result.returncode == 0 and "val_score" in metrics else "train_error"
+    score = float(metrics["val_score"]) if "val_score" in metrics else None
+    result = AuditResult(
+        run_name=run_name,
+        status=status,
+        score=score,
+        metrics=metrics,
+        log_path=str(audit_paths["train_log"].relative_to(project_dir)),
+        train_hash=train_hash,
+    )
+    write_text(
+        audit_paths["json"],
+        json.dumps(
+            {
+                "run_name": result.run_name,
+                "status": result.status,
+                "score": result.score,
+                "metrics": result.metrics,
+                "log_path": result.log_path,
+                "train_hash": result.train_hash,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    return result
+
+
+def audit_allows_promotion(
+    current_audit: AuditResult | None,
+    candidate_audit: AuditResult | None,
+    max_regression: float,
+) -> bool:
+    if candidate_audit is None or candidate_audit.status != "ok" or candidate_audit.score is None:
+        return False
+    if current_audit is None or current_audit.status != "ok" or current_audit.score is None:
+        return True
+    return candidate_audit.score >= (current_audit.score - max_regression)
 
 
 def strategy_scorecards(
@@ -538,9 +716,15 @@ def write_missing_retrospectives(
 
 def resolve_source_candidate(
     project_dir: Path,
+    paths: dict[str, Path],
     artifact_root: str,
     manager_history: list[dict[str, Any]],
     explicit_source_run: str,
+    remote_project_dir: str,
+    remote_audit_root: str,
+    audit_cache: str,
+    audit_timeout: int,
+    audit_max_regression: float,
 ) -> dict[str, Any]:
     best_train, best_log, source_state = best_paths_for_run(project_dir, explicit_source_run, artifact_root)
     candidate = {
@@ -552,8 +736,30 @@ def resolve_source_candidate(
         "strategy": "source",
         "timestamp": source_state.get("updated_at", ""),
     }
+    candidate["audit"] = ensure_audit_result(
+        project_dir,
+        paths,
+        candidate["run_name"],
+        candidate["best_train_path"],
+        remote_project_dir,
+        remote_audit_root,
+        audit_cache,
+        audit_timeout,
+    )
     for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
-        if managed["best_score"] > candidate["best_score"]:
+        if managed["best_score"] <= candidate["best_score"]:
+            continue
+        managed["audit"] = ensure_audit_result(
+            project_dir,
+            paths,
+            managed["run_name"],
+            managed["best_train_path"],
+            remote_project_dir,
+            remote_audit_root,
+            audit_cache,
+            audit_timeout,
+        )
+        if audit_allows_promotion(candidate.get("audit"), managed["audit"], audit_max_regression):
             candidate = managed
     return candidate
 
@@ -656,7 +862,18 @@ def do_recommend(args: argparse.Namespace) -> None:
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
     retro_signals = load_retro_signals(paths["retros"])
     cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
-    resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
+    resolved = resolve_source_candidate(
+        project_dir,
+        paths,
+        args.artifact_root,
+        manager_history,
+        args.source_run,
+        args.remote_project_dir,
+        args.remote_audit_root,
+        args.audit_cache,
+        args.audit_timeout,
+        args.audit_max_regression,
+    )
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
@@ -664,6 +881,9 @@ def do_recommend(args: argparse.Namespace) -> None:
     print(f"source_run:      {args.source_run}")
     print(f"resolved_run:    {resolved['run_name']}")
     print(f"resolved_score:  {resolved['best_score']:.6f}")
+    audit = resolved.get("audit")
+    if audit is not None:
+        print(f"resolved_audit:  {audit.status} {format(audit.score, '.6f') if audit.score is not None else 'NA'}")
     print(f"completed:       {analysis['completed']}")
     print(f"plateaued:       {analysis['plateaued']}")
     print(f"tail_reverts:    {analysis['tail_reverts']}/{analysis['tail_count']}")
@@ -702,7 +922,18 @@ def do_launch_next(args: argparse.Namespace) -> None:
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
     retro_signals = load_retro_signals(paths["retros"])
     cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
-    resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
+    resolved = resolve_source_candidate(
+        project_dir,
+        paths,
+        args.artifact_root,
+        manager_history,
+        args.source_run,
+        args.remote_project_dir,
+        args.remote_audit_root,
+        args.audit_cache,
+        args.audit_timeout,
+        args.audit_max_regression,
+    )
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
@@ -731,6 +962,8 @@ def do_launch_next(args: argparse.Namespace) -> None:
         "source_run": args.source_run,
         "resolved_source_run": resolved["run_name"],
         "source_best_score": float(source_state["best_score"]),
+        "source_audit_score": resolved["audit"].score if resolved.get("audit") is not None else None,
+        "source_audit_status": resolved["audit"].status if resolved.get("audit") is not None else "",
         "source_best_log": str(best_log.relative_to(project_dir)),
         "source_best_train": str(best_train.relative_to(project_dir)),
         "source_plateaued": analysis["plateaued"],
@@ -820,6 +1053,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--source-run", required=True, help="Existing run to analyze and promote from.")
     common.add_argument("--tail-window", type=int, default=6, help="How many recent iterations define a plateau.")
     common.add_argument("--strategy", default=None, help="Optional explicit strategy preset.")
+    common.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
+    common.add_argument("--remote-audit-root", default=DEFAULT_REMOTE_AUDIT_ROOT, help="Remote workspace root used for isolated audit reruns.")
+    common.add_argument("--audit-cache", default=DEFAULT_AUDIT_CACHE, help="Remote cache dir used for larger audit reruns.")
+    common.add_argument("--audit-timeout", type=int, default=1200, help="Timeout in seconds for audit reruns.")
+    common.add_argument("--audit-max-regression", type=float, default=0.010, help="Maximum allowed audit-score drop when promoting a better main benchmark result.")
 
     recommend = subparsers.add_parser("recommend", parents=[common], help="Suggest the next strategy for a source run.")
     recommend.set_defaults(func=do_recommend)
@@ -828,7 +1066,6 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--run-name", default=None, help="Optional explicit run name.")
     launch.add_argument("--agent", choices=["codex", "claude", "none"], default="codex", help="Editing agent to invoke.")
     launch.add_argument("--agent-model", default=None, help="Optional model override for the agent CLI.")
-    launch.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
     launch.add_argument("--dataset-cache", default=DEFAULT_DATASET_CACHE, help="Remote cache dir used by train.py.")
     launch.add_argument("--dry-run", action="store_true", help="Plan the next run without launching it.")
     launch.add_argument(
@@ -843,7 +1080,6 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--supervisor-name", default="autonomy", help="Name used for supervisor log files.")
     supervise.add_argument("--agent", choices=["codex", "claude", "none"], default="codex", help="Editing agent to invoke.")
     supervise.add_argument("--agent-model", default=None, help="Optional model override for the agent CLI.")
-    supervise.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
     supervise.add_argument("--dataset-cache", default=DEFAULT_DATASET_CACHE, help="Remote cache dir used by train.py.")
     supervise.add_argument("--stale-seconds", type=int, default=1800, help="Kill and replace active runs that show no progress for this many seconds.")
     supervise.add_argument("--once", action="store_true", help="Run a single supervisor check cycle and exit.")

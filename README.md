@@ -157,6 +157,8 @@ Manager-launched runs execute from disposable copied workspaces under [artifacts
 
 Strategy families now live in [strategies](/Volumes/bkawk/projects/mesh-para/cadresearch/strategies) as small JSON packs, and completed manager-launched runs get markdown retros under [artifacts/manager/default/retros](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/retros). The manager now uses those retros to tag strategies as `continue`, `probe_nearby`, `reliability`, or `cool_down` instead of relying only on raw score totals.
 
+Manager promotion decisions now also use cached 2048-set audit reruns under [artifacts/manager/default/audits](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/audits). Those audits run in isolated remote workspaces so they do not interfere with the main overnight worker. The first recommendation after enabling this can be slower because the manager may need to backfill audit results for older candidate runs.
+
 ## Working with ABC
 
 The current real-data path uses matched ABC mesh, STEP, and feature archives:
