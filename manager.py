@@ -94,6 +94,7 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "root": root,
         "history": root / "history.jsonl",
         "state": root / "state.json",
+        "audit_queue": root / "audit_queue.json",
         "logs": root / "logs",
         "retros": root / "retros",
         "audits": root / "audits",
@@ -161,6 +162,30 @@ def load_manager_state(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(read_text(path))
+
+
+def load_audit_queue(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    payload = json.loads(read_text(path))
+    def valid(items: list[Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not item.get("run_name") or not item.get("best_train_path") or not item.get("train_hash"):
+                continue
+            rows.append(item)
+        return rows
+    if isinstance(payload, list):
+        return valid(payload)
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        return valid(payload["items"])
+    return []
+
+
+def save_audit_queue(path: Path, queue: list[dict[str, Any]]) -> None:
+    save_json(path, {"items": queue})
 
 
 def active_run_names() -> set[str]:
@@ -352,6 +377,28 @@ def cached_audit_result(paths: dict[str, Path], run_name: str, best_train_path: 
     return cached
 
 
+def queue_audit_target(
+    queue: list[dict[str, Any]],
+    run_name: str,
+    best_train_path: Path,
+    best_score: float,
+) -> bool:
+    train_hash = file_sha256(best_train_path)
+    for item in queue:
+        if item.get("train_hash") == train_hash:
+            return False
+    queue.append(
+        {
+            "run_name": run_name,
+            "train_hash": train_hash,
+            "best_train_path": str(best_train_path),
+            "best_score": best_score,
+            "queued_at": utc_now(),
+        }
+    )
+    return True
+
+
 def ensure_audit_result(
     project_dir: Path,
     paths: dict[str, Path],
@@ -485,6 +532,53 @@ def audit_allows_promotion(
     if current_audit is None or current_audit.status != "ok" or current_audit.score is None:
         return True
     return candidate_audit.score >= (current_audit.score - max_regression)
+
+
+def process_next_audit(
+    project_dir: Path,
+    paths: dict[str, Path],
+    artifact_root: str,
+    remote_project_dir: str,
+    remote_audit_root: str,
+    audit_cache: str,
+    audit_timeout: int,
+) -> dict[str, Any] | None:
+    queue = load_audit_queue(paths["audit_queue"])
+    if not queue:
+        return None
+
+    remaining: list[dict[str, Any]] = []
+    current = queue[0]
+    for item in queue[1:]:
+        remaining.append(item)
+
+    run_name = str(current.get("run_name", ""))
+    if not run_name:
+        save_audit_queue(paths["audit_queue"], remaining)
+        return {"run_name": "", "status": "skipped"}
+
+    best_train_path = resolve_state_path(str(current.get("best_train_path", "")), project_dir)
+    if not best_train_path.exists():
+        save_audit_queue(paths["audit_queue"], remaining)
+        return {"run_name": run_name, "status": "missing_train"}
+
+    result = ensure_audit_result(
+        project_dir,
+        paths,
+        run_name,
+        best_train_path,
+        remote_project_dir,
+        remote_audit_root,
+        audit_cache,
+        audit_timeout,
+    )
+    save_audit_queue(paths["audit_queue"], remaining)
+    return {
+        "run_name": run_name,
+        "status": result.status,
+        "score": result.score,
+        "log_path": result.log_path,
+    }
 
 
 def strategy_scorecards(
@@ -736,6 +830,7 @@ def resolve_source_candidate(
     audit_timeout: int,
     audit_max_regression: float,
     refresh_audits: bool,
+    audit_queue: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     best_train, best_log, source_state = best_paths_for_run(project_dir, explicit_source_run, artifact_root)
     candidate = {
@@ -760,6 +855,8 @@ def resolve_source_candidate(
         )
     else:
         candidate["audit"] = cached_audit_result(paths, candidate["run_name"], candidate["best_train_path"])
+        if candidate["audit"] is None and audit_queue is not None:
+            queue_audit_target(audit_queue, candidate["run_name"], candidate["best_train_path"], candidate["best_score"])
     for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
         if managed["best_score"] <= candidate["best_score"]:
             continue
@@ -776,6 +873,8 @@ def resolve_source_candidate(
             )
         else:
             managed["audit"] = cached_audit_result(paths, managed["run_name"], managed["best_train_path"])
+            if managed["audit"] is None and audit_queue is not None:
+                queue_audit_target(audit_queue, managed["run_name"], managed["best_train_path"], managed["best_score"])
         if audit_allows_promotion(candidate.get("audit"), managed["audit"], audit_max_regression):
             candidate = managed
     return candidate
@@ -877,6 +976,8 @@ def do_recommend(args: argparse.Namespace) -> None:
     strategies = load_strategies(project_dir, args.strategy_dir)
     active = sorted(active_run_names())
     refresh_audits = args.allow_live_audits or not active
+    audit_queue = load_audit_queue(paths["audit_queue"])
+    queue_before = len(audit_queue)
     manager_history = load_jsonl(paths["history"])
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
     retro_signals = load_retro_signals(paths["retros"])
@@ -893,7 +994,10 @@ def do_recommend(args: argparse.Namespace) -> None:
         args.audit_timeout,
         args.audit_max_regression,
         refresh_audits,
+        audit_queue if not refresh_audits else None,
     )
+    if not refresh_audits:
+        save_audit_queue(paths["audit_queue"], audit_queue)
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
@@ -902,6 +1006,8 @@ def do_recommend(args: argparse.Namespace) -> None:
     print(f"audit_mode:      {'refresh' if refresh_audits else 'cached_only'}")
     if active:
         print(f"active_runs:     {','.join(active)}")
+    if not refresh_audits:
+        print(f"audit_queue:     {len(audit_queue)} (added {len(audit_queue) - queue_before})")
     print(f"resolved_run:    {resolved['run_name']}")
     print(f"resolved_score:  {resolved['best_score']:.6f}")
     audit = resolved.get("audit")
@@ -958,6 +1064,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         args.audit_max_regression,
         True,
     )
+    save_audit_queue(paths["audit_queue"], [])
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
@@ -1048,13 +1155,29 @@ def do_supervise(args: argparse.Namespace) -> None:
             message = f"[{timestamp}] idle=false active_runs={','.join(active)}"
             log_line(log_path, message)
         else:
-            message = f"[{timestamp}] idle=true launching_next"
-            log_line(log_path, message)
-            launch_args = argparse.Namespace(**vars(args))
-            launch_args.dry_run = False
-            launch_args.require_idle = False
-            launch_args.run_name = None
-            do_launch_next(launch_args)
+            audit_result = process_next_audit(
+                project_dir,
+                paths,
+                args.artifact_root,
+                args.remote_project_dir,
+                args.remote_audit_root,
+                args.audit_cache,
+                args.audit_timeout,
+            )
+            if audit_result is not None:
+                message = (
+                    f"[{timestamp}] idle=true audit_run={audit_result.get('run_name','')} "
+                    f"status={audit_result.get('status','')} score={audit_result.get('score','NA')}"
+                )
+                log_line(log_path, message)
+            else:
+                message = f"[{timestamp}] idle=true launching_next"
+                log_line(log_path, message)
+                launch_args = argparse.Namespace(**vars(args))
+                launch_args.dry_run = False
+                launch_args.require_idle = False
+                launch_args.run_name = None
+                do_launch_next(launch_args)
             if args.once:
                 return
 
