@@ -329,6 +329,17 @@ def run_training(
     return run_shell(train_command, project_dir, train_log_path, timeout_seconds=timeout_seconds)
 
 
+def run_training_attempt(
+    project_dir: Path,
+    train_command: str,
+    train_log_path: Path,
+    timeout_seconds: int | None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, float]]:
+    result = run_training(project_dir, train_command, train_log_path, timeout_seconds=timeout_seconds)
+    metrics = parse_metrics(read_text(train_log_path))
+    return result, metrics
+
+
 def run_loop(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     train_path = project_dir / "train.py"
@@ -432,8 +443,12 @@ def run_loop(args: argparse.Namespace) -> None:
                 save_state(layout, state)
                 continue
 
-        train_result = run_training(project_dir, args.train_command, train_log_path, timeout_seconds=args.train_timeout)
-        train_metrics = parse_metrics(read_text(train_log_path))
+        train_result, train_metrics = run_training_attempt(
+            project_dir,
+            args.train_command,
+            train_log_path,
+            timeout_seconds=args.train_timeout,
+        )
         record.update(train_metrics)
 
         if train_result.returncode != 0 or "val_score" not in train_metrics:
@@ -453,19 +468,69 @@ def run_loop(args: argparse.Namespace) -> None:
             continue
 
         score = float(train_metrics["val_score"])
+        delta = score - best_score
         improved = score > (best_score + args.min_improvement)
         if improved:
-            record["status"] = "keep"
-            record["notes"] = f"improved by {score - best_score:.6f}"
-            write_text(layout.best_train_path, current_text)
-            state["best_iteration"] = iteration
-            state["best_score"] = score
-            state["best_metrics"] = train_metrics
-            state["best_train_sha256"] = candidate_hash
-            state["best_log"] = os.path.relpath(train_log_path, project_dir)
+            confirmed = True
+            confirmed_score = score
+            confirmed_metrics = train_metrics
+            confirmed_log_rel = os.path.relpath(train_log_path, project_dir)
+
+            for confirm_idx in range(args.confirm_runs):
+                confirm_log_path = layout.logs_dir / f"iter_{iteration:04d}_confirm{confirm_idx + 1}.log"
+                confirm_result, confirm_metrics = run_training_attempt(
+                    project_dir,
+                    args.train_command,
+                    confirm_log_path,
+                    timeout_seconds=args.train_timeout,
+                )
+                record[f"confirm_{confirm_idx + 1}_log"] = os.path.relpath(confirm_log_path, project_dir)
+                if confirm_result.returncode != 0 or "val_score" not in confirm_metrics:
+                    confirmed = False
+                    if confirm_result.returncode == TIMEOUT_EXIT_CODE:
+                        record["status"] = "confirm_error"
+                        record["notes"] = f"confirmation timed out after {args.train_timeout}s"
+                    else:
+                        record["status"] = "confirm_error"
+                        record["notes"] = (
+                            f"confirmation exited {confirm_result.returncode}"
+                            if confirm_result.returncode != 0
+                            else "confirmation val_score missing from train log"
+                        )
+                    break
+
+                confirm_score = float(confirm_metrics["val_score"])
+                record[f"confirm_{confirm_idx + 1}_score"] = confirm_score
+                if confirm_score <= (best_score + args.min_improvement):
+                    confirmed = False
+                    record["status"] = "confirm_revert"
+                    record["notes"] = (
+                        f"initial delta {delta:.6f}, confirmation delta {confirm_score - best_score:.6f}"
+                    )
+                    break
+
+                confirmed_score = confirm_score
+                confirmed_metrics = confirm_metrics
+                confirmed_log_rel = os.path.relpath(confirm_log_path, project_dir)
+
+            if confirmed:
+                record["status"] = "keep"
+                record["notes"] = f"improved by {confirmed_score - best_score:.6f}"
+                write_text(layout.best_train_path, current_text)
+                state["best_iteration"] = iteration
+                state["best_score"] = confirmed_score
+                state["best_metrics"] = confirmed_metrics
+                state["best_train_sha256"] = candidate_hash
+                state["best_log"] = confirmed_log_rel
+            else:
+                write_text(train_path, best_train_text)
+        elif delta >= -args.near_miss_window:
+            record["status"] = "near_miss"
+            record["notes"] = f"delta {delta:.6f}"
+            write_text(train_path, best_train_text)
         else:
             record["status"] = "revert"
-            record["notes"] = f"delta {score - best_score:.6f}"
+            record["notes"] = f"delta {delta:.6f}"
             write_text(train_path, best_train_text)
 
         state["iterations_completed"] = iteration
@@ -541,6 +606,8 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser.add_argument("--train-command", required=True, help="Shell command that runs train.py and prints metrics to stdout.")
     loop_parser.add_argument("--train-timeout", type=int, default=900, help="Timeout in seconds for the training command.")
     loop_parser.add_argument("--min-improvement", type=float, default=0.0, help="Minimum required improvement over the current best.")
+    loop_parser.add_argument("--confirm-runs", type=int, default=1, help="Number of confirmation reruns required before promoting a new best candidate.")
+    loop_parser.add_argument("--near-miss-window", type=float, default=0.002, help="Treat candidates within this score delta band below the best as near misses instead of plain reverts.")
     loop_parser.set_defaults(func=run_loop)
 
     return parser

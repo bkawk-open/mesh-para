@@ -10,6 +10,8 @@ This repo does not solve full Mesh -> STEP today. It focuses on the stage-1 prob
 
 The repo pattern comes from Karpathy's [autoresearch reference clone](/Volumes/bkawk/projects/mesh-para/reference), which we used as the starting point for the one-file autonomous research loop design.
 
+Matthew Berman helped put `autoresearch` on our radar in the first place, which is what kicked off this direction for the project.
+
 ## Why this exists
 
 Mesh -> STEP is not a normal format conversion. The mesh has already discarded design intent, and recovering CAD means inferring:
@@ -112,6 +114,8 @@ Check the current best:
 ```bash
 python3 research.py status --run-name boundary512
 ```
+
+By default, `research.py` now reruns any apparent winner once before promotion and records close sub-threshold results as `near_miss` instead of treating them as ordinary reverts.
 
 ## Managing autonomy
 
