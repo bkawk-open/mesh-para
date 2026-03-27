@@ -1,0 +1,7 @@
+{
+  "name": "global_context",
+  "description": "Search only around low-cost global context mixing and point/global fusion.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only global-context aggregation or how global features are fused back into per-point features. Keep the geometry-aware local edge block unchanged. Avoid deeper local stacks, larger k, or extra neighborhood passes. Protect throughput first.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

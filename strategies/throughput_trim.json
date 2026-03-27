@@ -1,0 +1,7 @@
+{
+  "name": "throughput_trim",
+  "description": "Recover throughput with tiny simplifications that may improve effective optimization in 5 minutes.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only tiny simplifications or fusion changes that could increase effective optimization progress within the fixed 5-minute budget. Do not make the local neighborhood path heavier. Avoid larger k, second neighborhood passes, or deeper model stacks.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

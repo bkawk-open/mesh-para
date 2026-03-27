@@ -1,0 +1,7 @@
+{
+  "name": "class_fusion",
+  "description": "Try small class-aware feature routing without large per-class heads.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only lightweight class-aware or task-aware feature fusion for classification and parameter prediction. Keep the local block and neighborhood count unchanged. Avoid heavy separate heads, deeper stacks, or expensive new branches. Protect throughput first.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

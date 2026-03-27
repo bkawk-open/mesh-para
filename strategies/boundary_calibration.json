@@ -1,0 +1,7 @@
+{
+  "name": "boundary_calibration",
+  "description": "Refine how boundary supervision influences the shared features without adding heavy compute.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only boundary-head usage, boundary-conditioned feature fusion, or boundary loss calibration. Keep the local neighborhood block unchanged. Avoid deeper local stacks, larger k, second neighborhood passes, or broad optimizer rewrites. Protect throughput first.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

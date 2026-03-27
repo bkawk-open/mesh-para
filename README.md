@@ -155,6 +155,8 @@ The supervisor checks whether any `research.py loop` process is active. If the l
 
 Manager-launched runs execute from disposable copied workspaces under [artifacts/manager](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager), so the main repo checkout can stay clean while autonomy is running.
 
+Strategy families now live in [strategies](/Volumes/bkawk/projects/mesh-para/cadresearch/strategies) as small JSON packs, and completed manager-launched runs get markdown retros under [artifacts/manager/default/retros](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/retros).
+
 ## Working with ABC
 
 The current real-data path uses matched ABC mesh, STEP, and feature archives:

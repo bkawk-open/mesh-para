@@ -30,6 +30,7 @@ from research import build_layout, load_state, read_text, write_text
 DEFAULT_AUTORESEARCH_ROOT = "artifacts/autoresearch"
 DEFAULT_MANAGER_ROOT = "artifacts/manager"
 DEFAULT_MANAGER_NAME = "default"
+DEFAULT_STRATEGY_DIR = "strategies"
 DEFAULT_REMOTE_PROJECT_DIR = "/data/projects/mesh-para/cadresearch"
 DEFAULT_DATASET_CACHE = "/data/projects/mesh-para/cadresearch/artifacts/abc_cache_512_boundary"
 ACTIVE_RUN_PATTERN = re.compile(r"research\.py loop --run-name ([A-Za-z0-9_.-]+)")
@@ -42,6 +43,7 @@ class StrategyPreset:
     prompt_extra: str
     min_improvement: float = 0.001
     iterations: int = 16
+    path: str = ""
 
 
 @dataclass
@@ -56,50 +58,6 @@ class StrategyStats:
     last_run_name: str = ""
     last_timestamp: str = ""
     score: float = 0.0
-
-
-STRATEGIES: tuple[StrategyPreset, ...] = (
-    StrategyPreset(
-        name="boundary_calibration",
-        description="Refine how boundary supervision influences the shared features without adding heavy compute.",
-        prompt_extra=(
-            "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. "
-            "Target only boundary-head usage, boundary-conditioned feature fusion, or boundary loss calibration. "
-            "Keep the local neighborhood block unchanged. Avoid deeper local stacks, larger k, second neighborhood "
-            "passes, or broad optimizer rewrites. Protect throughput first."
-        ),
-    ),
-    StrategyPreset(
-        name="global_context",
-        description="Search only around low-cost global context mixing and point/global fusion.",
-        prompt_extra=(
-            "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. "
-            "Target only global-context aggregation or how global features are fused back into per-point features. "
-            "Keep the geometry-aware local edge block unchanged. Avoid deeper local stacks, larger k, or extra "
-            "neighborhood passes. Protect throughput first."
-        ),
-    ),
-    StrategyPreset(
-        name="class_fusion",
-        description="Try small class-aware feature routing without large per-class heads.",
-        prompt_extra=(
-            "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. "
-            "Target only lightweight class-aware or task-aware feature fusion for classification and parameter "
-            "prediction. Keep the local block and neighborhood count unchanged. Avoid heavy separate heads, deeper "
-            "stacks, or expensive new branches. Protect throughput first."
-        ),
-    ),
-    StrategyPreset(
-        name="throughput_trim",
-        description="Recover throughput with tiny simplifications that may improve effective optimization in 5 minutes.",
-        prompt_extra=(
-            "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. "
-            "Target only tiny simplifications or fusion changes that could increase effective optimization progress "
-            "within the fixed 5-minute budget. Do not make the local neighborhood path heavier. Avoid larger k, "
-            "second neighborhood passes, or deeper model stacks."
-        ),
-    ),
-)
 
 
 def utc_now() -> str:
@@ -117,12 +75,14 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "history": root / "history.jsonl",
         "state": root / "state.json",
         "logs": root / "logs",
+        "retros": root / "retros",
         "workspaces": root / "workspaces",
     }
 
 
 def ensure_manager_dirs(paths: dict[str, Path]) -> None:
     paths["logs"].mkdir(parents=True, exist_ok=True)
+    paths["retros"].mkdir(parents=True, exist_ok=True)
     paths["workspaces"].mkdir(parents=True, exist_ok=True)
 
 
@@ -140,6 +100,28 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in read_text(path).splitlines() if line.strip()]
+
+
+def load_strategies(project_dir: Path, strategy_dir: str) -> tuple[StrategyPreset, ...]:
+    root = (project_dir / strategy_dir).resolve()
+    if not root.exists():
+        raise SystemExit(f"Strategy directory not found: {root}")
+    strategies: list[StrategyPreset] = []
+    for path in sorted(root.glob("*.json")):
+        data = json.loads(read_text(path))
+        strategies.append(
+            StrategyPreset(
+                name=data["name"],
+                description=data["description"],
+                prompt_extra=data["prompt_extra"],
+                min_improvement=float(data.get("min_improvement", 0.001)),
+                iterations=int(data.get("iterations", 16)),
+                path=str(path.relative_to(project_dir)),
+            )
+        )
+    if not strategies:
+        raise SystemExit(f"No strategy files found in {root}")
+    return tuple(strategies)
 
 
 def load_run_history(project_dir: Path, run_name: str, artifact_root: str) -> list[dict[str, Any]]:
@@ -231,16 +213,20 @@ def analyze_run(history: list[dict[str, Any]], tail_window: int) -> dict[str, An
     }
 
 
-def strategy_map() -> dict[str, StrategyPreset]:
-    return {strategy.name: strategy for strategy in STRATEGIES}
+def strategy_map(strategies: tuple[StrategyPreset, ...]) -> dict[str, StrategyPreset]:
+    return {strategy.name: strategy for strategy in strategies}
 
 
-def choose_strategy(manager_history: list[dict[str, Any]], preferred: str | None = None) -> StrategyPreset:
-    strategies = strategy_map()
+def choose_strategy(
+    strategies: tuple[StrategyPreset, ...],
+    manager_history: list[dict[str, Any]],
+    preferred: str | None = None,
+) -> StrategyPreset:
+    strategies_by_name = strategy_map(strategies)
     if preferred:
-        if preferred not in strategies:
-            raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies)}")
-        return strategies[preferred]
+        if preferred not in strategies_by_name:
+            raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies_by_name)}")
+        return strategies_by_name[preferred]
     raise RuntimeError("choose_strategy requires scorecards; use choose_strategy_with_stats")
 
 
@@ -306,8 +292,13 @@ def completed_manager_runs(project_dir: Path, manager_history: list[dict[str, An
     return completed
 
 
-def strategy_scorecards(project_dir: Path, manager_history: list[dict[str, Any]], artifact_root: str) -> dict[str, StrategyStats]:
-    cards = {strategy.name: StrategyStats(name=strategy.name) for strategy in STRATEGIES}
+def strategy_scorecards(
+    project_dir: Path,
+    strategies: tuple[StrategyPreset, ...],
+    manager_history: list[dict[str, Any]],
+    artifact_root: str,
+) -> dict[str, StrategyStats]:
+    cards = {strategy.name: StrategyStats(name=strategy.name) for strategy in strategies}
     for row in manager_history:
         if row.get("status") != "launched":
             continue
@@ -360,15 +351,16 @@ def strategy_scorecards(project_dir: Path, manager_history: list[dict[str, Any]]
 
 
 def choose_strategy_with_stats(
+    strategies: tuple[StrategyPreset, ...],
     manager_history: list[dict[str, Any]],
     cards: dict[str, StrategyStats],
     preferred: str | None = None,
 ) -> StrategyPreset:
-    strategies = strategy_map()
+    strategies_by_name = strategy_map(strategies)
     if preferred:
-        if preferred not in strategies:
-            raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies)}")
-        return strategies[preferred]
+        if preferred not in strategies_by_name:
+            raise SystemExit(f"Unknown strategy {preferred!r}. Available: {', '.join(strategies_by_name)}")
+        return strategies_by_name[preferred]
 
     recent = [
         row.get("strategy")
@@ -378,7 +370,7 @@ def choose_strategy_with_stats(
     last_strategy = recent[0] if recent else None
 
     ordered = sorted(
-        STRATEGIES,
+        strategies,
         key=lambda strategy: (
             cards[strategy.name].score,
             cards[strategy.name].avg_best_delta,
@@ -387,13 +379,96 @@ def choose_strategy_with_stats(
         reverse=True,
     )
     if not ordered:
-        return STRATEGIES[0]
+        return strategies[0]
     if last_strategy is None:
         return ordered[0]
     for strategy in ordered:
         if strategy.name != last_strategy:
             return strategy
     return ordered[0]
+
+
+def write_retrospective(
+    project_dir: Path,
+    retros_dir: Path,
+    run_name: str,
+    artifact_root: str,
+    manager_row: dict[str, Any],
+) -> Path | None:
+    layout = build_layout(project_dir, run_name, artifact_root)
+    state = load_state(layout)
+    if state is None or not layout.history_path.exists():
+        return None
+    history = load_run_history(project_dir, run_name, artifact_root)
+    if not history:
+        return None
+
+    seed = next((row for row in history if row.get("iteration") == 0), None)
+    best_score = float(state["best_score"])
+    seed_score = float(seed.get("val_score", best_score)) if seed else best_score
+    delta = best_score - seed_score
+    keepers = [row for row in history if row.get("status") == "keep"]
+    near_misses = [row for row in history if row.get("status") == "near_miss"]
+    errors = [row for row in history if str(row.get("status", "")).endswith("error")]
+    latest = history[-1]
+    retros_dir.mkdir(parents=True, exist_ok=True)
+    path = retros_dir / f"{sanitize_name(run_name)}.md"
+    lines = [
+        f"# Retrospective: {run_name}",
+        "",
+        f"- Strategy: `{manager_row.get('strategy', '')}`",
+        f"- Source run: `{manager_row.get('resolved_source_run', manager_row.get('source_run', ''))}`",
+        f"- Started from score: `{seed_score:.6f}`",
+        f"- Best score: `{best_score:.6f}`",
+        f"- Net delta: `{delta:.6f}`",
+        f"- Iterations completed: `{state.get('iterations_completed', 0)}`",
+        f"- Keepers: `{len(keepers)}`",
+        f"- Near misses: `{len(near_misses)}`",
+        f"- Errors: `{len(errors)}`",
+        f"- Latest status: `{latest.get('status', '')}`",
+        "",
+        "## Notes",
+    ]
+    if keepers:
+        best_keeper = keepers[-1]
+        lines.append(
+            f"- Best keeper was iteration `{best_keeper.get('iteration')}` with score `{float(best_keeper.get('val_score', 0.0)):.6f}`."
+        )
+    else:
+        lines.append("- No keeper in this run.")
+    if near_misses:
+        lines.append(
+            "- Near-miss iterations: "
+            + ", ".join(
+                f"`{row.get('iteration')}` ({float(row.get('val_score', 0.0)):.6f})"
+                for row in near_misses[:5]
+            )
+        )
+    if errors:
+        lines.append(
+            "- Error iterations: "
+            + ", ".join(f"`{row.get('iteration')}` ({row.get('status')})" for row in errors[:5])
+        )
+    write_text(path, "\n".join(lines) + "\n")
+    return path
+
+
+def write_missing_retrospectives(
+    project_dir: Path,
+    paths: dict[str, Path],
+    manager_history: list[dict[str, Any]],
+    artifact_root: str,
+) -> None:
+    for row in manager_history:
+        if row.get("status") != "launched":
+            continue
+        run_name = row.get("run_name")
+        if not run_name:
+            continue
+        retro_path = paths["retros"] / f"{sanitize_name(run_name)}.md"
+        if retro_path.exists():
+            continue
+        write_retrospective(project_dir, paths["retros"], run_name, artifact_root, row)
 
 
 def resolve_source_candidate(
@@ -510,12 +585,15 @@ def create_workspace(
 def do_recommend(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    ensure_manager_dirs(paths)
+    strategies = load_strategies(project_dir, args.strategy_dir)
     manager_history = load_jsonl(paths["history"])
-    cards = strategy_scorecards(project_dir, manager_history, args.artifact_root)
+    write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
+    cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
-    strategy = choose_strategy_with_stats(manager_history, cards, args.strategy)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, args.strategy)
 
     print(f"source_run:      {args.source_run}")
     print(f"resolved_run:    {resolved['run_name']}")
@@ -533,7 +611,7 @@ def do_recommend(args: argparse.Namespace) -> None:
             print(f"latest_score:    {float(latest['val_score']):.6f}")
     print(f"next_strategy:   {strategy.name}")
     print(f"description:     {strategy.description}")
-    for name in [s.name for s in STRATEGIES]:
+    for name in [s.name for s in strategies]:
         card = cards[name]
         print(
             f"strategy_{name}: launches={card.launches} improvements={card.improvements} "
@@ -545,17 +623,19 @@ def do_launch_next(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
+    strategies = load_strategies(project_dir, args.strategy_dir)
 
     active = active_run_names()
     if args.require_idle and active:
         raise SystemExit(f"Active research runs detected: {', '.join(sorted(active))}")
 
     manager_history = load_jsonl(paths["history"])
-    cards = strategy_scorecards(project_dir, manager_history, args.artifact_root)
+    write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
+    cards = strategy_scorecards(project_dir, strategies, manager_history, args.artifact_root)
     resolved = resolve_source_candidate(project_dir, args.artifact_root, manager_history, args.source_run)
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
-    strategy = choose_strategy_with_stats(manager_history, cards, args.strategy)
+    strategy = choose_strategy_with_stats(strategies, manager_history, cards, args.strategy)
 
     best_train = resolved["best_train_path"]
     best_log = resolved["best_log"]
@@ -662,6 +742,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", default=DEFAULT_AUTORESEARCH_ROOT, help="Autoresearch artifact root.")
     parser.add_argument("--manager-root", default=DEFAULT_MANAGER_ROOT, help="Manager artifact root.")
     parser.add_argument("--manager-name", default=DEFAULT_MANAGER_NAME, help="Manager history namespace.")
+    parser.add_argument("--strategy-dir", default=DEFAULT_STRATEGY_DIR, help="Directory containing strategy-pack JSON files.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
