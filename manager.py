@@ -786,6 +786,19 @@ def collect_status_snapshot(
     }
 
 
+def format_snapshot_fields(snapshot: dict[str, Any]) -> str:
+    resolved = snapshot["resolved"]
+    analysis = snapshot["analysis"]
+    strategy = snapshot["strategy"]
+    return (
+        f"best_run={resolved['run_name']} "
+        f"best_score={resolved['best_score']:.6f} "
+        f"queued_audits={len(snapshot['audit_queue'])} "
+        f"latest_status={analysis['latest'].get('status') if analysis['latest'] else 'none'} "
+        f"next_strategy={strategy.name}"
+    )
+
+
 def write_retrospective(
     project_dir: Path,
     retros_dir: Path,
@@ -1215,12 +1228,13 @@ def do_launch_next(args: argparse.Namespace) -> None:
         record["status"] = "planned"
         append_jsonl(paths["history"], record)
         save_json(paths["state"], record)
-        print(f"planned_run:     {run_name}")
-        print(f"strategy:        {strategy.name}")
-        print(f"baseline_log:    {best_log}")
-        print(f"plateaued:       {analysis['plateaued']}")
-        print(f"command:         {command}")
-        return
+        if not getattr(args, "quiet", False):
+            print(f"planned_run:     {run_name}")
+            print(f"strategy:        {strategy.name}")
+            print(f"baseline_log:    {best_log}")
+            print(f"plateaued:       {analysis['plateaued']}")
+            print(f"command:         {command}")
+        return record
 
     launch_screen(workspace_dir, run_name, command, log_path)
     record["status"] = "launched"
@@ -1229,10 +1243,12 @@ def do_launch_next(args: argparse.Namespace) -> None:
     append_jsonl(paths["history"], record)
     save_json(paths["state"], record)
 
-    print(f"launched_run:    {run_name}")
-    print(f"strategy:        {strategy.name}")
-    print(f"screen_session:  {sanitize_name(run_name)}")
-    print(f"log_path:        {log_path}")
+    if not getattr(args, "quiet", False):
+        print(f"launched_run:    {run_name}")
+        print(f"strategy:        {strategy.name}")
+        print(f"screen_session:  {sanitize_name(run_name)}")
+        print(f"log_path:        {log_path}")
+    return record
 
 
 def do_supervise(args: argparse.Namespace) -> None:
@@ -1272,20 +1288,24 @@ def do_supervise(args: argparse.Namespace) -> None:
                 args.tail_window,
                 args.strategy,
             )
-            analysis = snapshot["analysis"]
-            resolved = snapshot["resolved"]
-            strategy = snapshot["strategy"]
-            message = (
-                f"[{timestamp}] idle=false "
-                f"active_runs={','.join(active)} "
-                f"best_run={resolved['run_name']} "
-                f"best_score={resolved['best_score']:.6f} "
-                f"queued_audits={len(snapshot['audit_queue'])} "
-                f"latest_status={analysis['latest'].get('status') if analysis['latest'] else 'none'} "
-                f"next_strategy={strategy.name}"
-            )
+            message = f"[{timestamp}] idle=false active_runs={','.join(active)} {format_snapshot_fields(snapshot)}"
             log_line(log_path, message)
         else:
+            snapshot = collect_status_snapshot(
+                project_dir,
+                paths,
+                strategies,
+                load_jsonl(paths["history"]),
+                args.artifact_root,
+                args.source_run,
+                args.remote_project_dir,
+                args.remote_audit_root,
+                args.audit_cache,
+                args.audit_timeout,
+                args.audit_max_regression,
+                args.tail_window,
+                args.strategy,
+            )
             audit_result = process_next_audit(
                 project_dir,
                 paths,
@@ -1297,18 +1317,32 @@ def do_supervise(args: argparse.Namespace) -> None:
             )
             if audit_result is not None:
                 message = (
-                    f"[{timestamp}] idle=true audit_run={audit_result.get('run_name','')} "
-                    f"status={audit_result.get('status','')} score={audit_result.get('score','NA')}"
+                    f"[{timestamp}] idle=true action=audit "
+                    f"{format_snapshot_fields(snapshot)} "
+                    f"audit_run={audit_result.get('run_name','')} "
+                    f"audit_status={audit_result.get('status','')} "
+                    f"audit_score={audit_result.get('score','NA')}"
                 )
                 log_line(log_path, message)
             else:
-                message = f"[{timestamp}] idle=true launching_next"
+                message = f"[{timestamp}] idle=true action=launch {format_snapshot_fields(snapshot)}"
                 log_line(log_path, message)
                 launch_args = argparse.Namespace(**vars(args))
                 launch_args.dry_run = False
                 launch_args.require_idle = False
                 launch_args.run_name = None
-                do_launch_next(launch_args)
+                launch_args.quiet = True
+                launch_record = do_launch_next(launch_args)
+                if launch_record is not None:
+                    log_line(
+                        log_path,
+                        f"[{timestamp}] launch_result run={launch_record.get('run_name','')} "
+                        f"strategy={launch_record.get('strategy','')} "
+                        f"source_run={launch_record.get('resolved_source_run','')} "
+                        f"source_score={launch_record.get('source_best_score','NA')} "
+                        f"source_audit={launch_record.get('source_audit_status','')} "
+                        f"source_audit_score={launch_record.get('source_audit_score','NA')}",
+                    )
             if args.once:
                 return
 

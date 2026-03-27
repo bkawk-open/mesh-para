@@ -170,7 +170,7 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
 
 The supervisor checks whether any `research.py loop` process is active. If the lab is idle, it asks the manager to launch the next run from the best completed baseline it knows about.
 
-The supervisor log at [artifacts/manager/default/logs/autonomy.log](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/logs/autonomy.log) now includes compact status snapshots during active runs, including the current best run, queued audit count, latest status, and next likely strategy.
+The supervisor log at [artifacts/manager/default/logs/autonomy.log](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/logs/autonomy.log) now includes compact status snapshots during active runs, and richer decision lines when the lab is idle enough to audit or launch, so you can read the manager's reasoning as a timeline.
 
 Manager-launched runs execute from disposable copied workspaces under [artifacts/manager](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager), so the main repo checkout can stay clean while autonomy is running.
 
