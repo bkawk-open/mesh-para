@@ -86,6 +86,8 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
         )
         fused_dim = hidden_dim + global_dim + hidden_dim
+        self.coarse_classifier = nn.Linear(fused_dim, num_classes)
+        self.class_context_proj = nn.Linear(num_classes, hidden_dim)
         self.classifier = nn.Sequential(
             nn.Linear(fused_dim, hidden_dim),
             nn.ReLU(),
@@ -101,16 +103,15 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.boundary_feature = nn.Sequential(
-            nn.Linear(fused_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
         self.boundary_fusion = nn.Sequential(
-            nn.Linear(fused_dim + hidden_dim + 1, hidden_dim),
+            nn.Linear(fused_dim + 1, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.Linear(hidden_dim, 2),
+        )
+        self.task_fusion = nn.Sequential(
+            nn.Linear(fused_dim + 1 + hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4),
         )
 
     def forward(
@@ -138,22 +139,32 @@ class LocalPointModel(nn.Module):
         global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
-        boundary_feat = self.boundary_feature(fused)
-        boundary_context = torch.cat([fused, boundary_feat, boundary_logits.unsqueeze(-1)], dim=-1)
-        fusion_params = self.boundary_fusion(boundary_context)
-        local_scale, local_shift, global_scale, global_shift = fusion_params.chunk(4, dim=-1)
-        local_feat = local_feat * (1.0 + 0.5 * torch.tanh(local_scale)) + 0.25 * local_shift
-        global_feat = global_feat * (1.0 + 0.5 * torch.tanh(global_scale)) + 0.25 * global_shift
-        task_fused = torch.cat(
+        boundary_context = torch.cat([fused, boundary_logits.unsqueeze(-1)], dim=-1)
+        boundary_gates = torch.sigmoid(self.boundary_fusion(boundary_context))
+        base_local_feat = local_feat * (1.0 + boundary_gates[..., :1])
+        base_global_feat = global_feat * (1.0 + boundary_gates[..., 1:2])
+        coarse_logits = self.coarse_classifier(fused)
+        class_context = self.class_context_proj(torch.softmax(coarse_logits, dim=-1))
+        task_context = torch.cat([fused, boundary_logits.unsqueeze(-1), class_context], dim=-1)
+        task_gates = torch.sigmoid(self.task_fusion(task_context))
+        cls_fused = torch.cat(
             [
                 point_feat,
-                local_feat,
-                global_feat,
+                base_local_feat * (1.0 + task_gates[..., :1]),
+                base_global_feat * (1.0 + task_gates[..., 1:2]),
             ],
             dim=-1,
         )
-        logits = self.classifier(task_fused)
-        param_pred = self.param_head(task_fused)
+        param_fused = torch.cat(
+            [
+                point_feat,
+                base_local_feat * (1.0 + task_gates[..., 2:3]),
+                base_global_feat * (1.0 + task_gates[..., 3:4]),
+            ],
+            dim=-1,
+        )
+        logits = self.classifier(cls_fused)
+        param_pred = self.param_head(param_fused)
         return logits, param_pred, boundary_logits
 
 
