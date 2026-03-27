@@ -1,0 +1,7 @@
+{
+  "name": "class_fusion",
+  "description": "Try somewhat richer task-aware fusion now that throughput headroom is higher.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only lightweight or moderately richer class-aware/task-aware feature fusion for classification and parameter prediction. You may spend a little more compute than the baseline search space, but avoid heavy per-class towers or large auxiliary branches.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

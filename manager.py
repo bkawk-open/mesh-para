@@ -32,6 +32,7 @@ DEFAULT_AUTORESEARCH_ROOT = "artifacts/autoresearch"
 DEFAULT_MANAGER_ROOT = "artifacts/manager"
 DEFAULT_MANAGER_NAME = "default"
 DEFAULT_STRATEGY_DIR = "strategies"
+DEFAULT_EXPANDED_STRATEGY_DIR = "strategies_expanded"
 DEFAULT_REMOTE_PROJECT_DIR = "/data/projects/mesh-para/cadresearch"
 DEFAULT_DATASET_CACHE = "/data/projects/mesh-para/cadresearch/artifacts/abc_cache_512_boundary"
 DEFAULT_AUDIT_CACHE = "/data/projects/mesh-para/cadresearch/artifacts/abc_cache_2048"
@@ -95,6 +96,8 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "history": root / "history.jsonl",
         "state": root / "state.json",
         "audit_queue": root / "audit_queue.json",
+        "hardware": root / "hardware",
+        "hardware_latest": root / "hardware" / "latest.json",
         "logs": root / "logs",
         "retros": root / "retros",
         "audits": root / "audits",
@@ -107,6 +110,7 @@ def ensure_manager_dirs(paths: dict[str, Path]) -> None:
     paths["retros"].mkdir(parents=True, exist_ok=True)
     paths["audits"].mkdir(parents=True, exist_ok=True)
     paths["workspaces"].mkdir(parents=True, exist_ok=True)
+    paths["hardware"].mkdir(parents=True, exist_ok=True)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -162,6 +166,84 @@ def load_manager_state(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(read_text(path))
+
+
+def load_hardware_profile(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(read_text(path))
+
+
+def classify_hardware_profile(gpus: list[dict[str, Any]]) -> str:
+    if not gpus:
+        return "unknown"
+    count = len(gpus)
+    max_memory_mb = max(int(gpu.get("memory_mb", 0)) for gpu in gpus)
+    names = " ".join(str(gpu.get("name", "")).lower() for gpu in gpus)
+    if count >= 2 or max_memory_mb >= 28000 or "5090" in names:
+        return "expanded"
+    return "baseline"
+
+
+def detect_remote_hardware(host: str) -> dict[str, Any]:
+    cmd = [
+        "ssh",
+        host,
+        "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits",
+    ]
+    result = subprocess.run(cmd, text=True, capture_output=True)
+    payload: dict[str, Any] = {
+        "timestamp": utc_now(),
+        "host": host,
+        "status": "ok" if result.returncode == 0 else "error",
+        "command": " ".join(cmd),
+        "stderr": result.stderr.strip(),
+        "gpus": [],
+    }
+    if result.returncode != 0:
+        return payload
+
+    gpus: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        row = [part.strip() for part in line.split(",")]
+        if len(row) < 3:
+            continue
+        name, memory_raw, driver = row[0], row[1], row[2]
+        try:
+            memory_mb = int(float(memory_raw))
+        except ValueError:
+            memory_mb = 0
+        gpus.append(
+            {
+                "name": name,
+                "memory_mb": memory_mb,
+                "driver_version": driver,
+            }
+        )
+    payload["gpus"] = gpus
+    payload["gpu_count"] = len(gpus)
+    payload["max_memory_mb"] = max((gpu["memory_mb"] for gpu in gpus), default=0)
+    payload["profile_tier"] = classify_hardware_profile(gpus)
+    return payload
+
+
+def effective_strategy_dir(
+    project_dir: Path,
+    requested_strategy_dir: str,
+    paths: dict[str, Path],
+    expanded_strategy_dir: str,
+) -> str:
+    if requested_strategy_dir != DEFAULT_STRATEGY_DIR:
+        return requested_strategy_dir
+    profile = load_hardware_profile(paths["hardware_latest"])
+    if not profile or profile.get("status") != "ok":
+        return requested_strategy_dir
+    if profile.get("profile_tier") != "expanded":
+        return requested_strategy_dir
+    expanded_root = (project_dir / expanded_strategy_dir).resolve()
+    if not expanded_root.exists():
+        return requested_strategy_dir
+    return expanded_strategy_dir
 
 
 def load_audit_queue(path: Path) -> list[dict[str, Any]]:
@@ -1104,7 +1186,8 @@ def do_recommend(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
-    strategies = load_strategies(project_dir, args.strategy_dir)
+    strategy_dir = effective_strategy_dir(project_dir, args.strategy_dir, paths, args.expanded_strategy_dir)
+    strategies = load_strategies(project_dir, strategy_dir)
     active = sorted(active_run_names())
     refresh_audits = args.allow_live_audits or not active
     audit_queue = load_audit_queue(paths["audit_queue"])
@@ -1134,6 +1217,7 @@ def do_recommend(args: argparse.Namespace) -> None:
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
 
     print(f"source_run:      {args.source_run}")
+    print(f"strategy_dir:    {strategy_dir}")
     print(f"audit_mode:      {'refresh' if refresh_audits else 'cached_only'}")
     if active:
         print(f"active_runs:     {','.join(active)}")
@@ -1172,7 +1256,8 @@ def do_status(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
-    strategies = load_strategies(project_dir, args.strategy_dir)
+    strategy_dir = effective_strategy_dir(project_dir, args.strategy_dir, paths, args.expanded_strategy_dir)
+    strategies = load_strategies(project_dir, strategy_dir)
     manager_history = load_jsonl(paths["history"])
     snapshot = collect_status_snapshot(
         project_dir,
@@ -1199,6 +1284,7 @@ def do_status(args: argparse.Namespace) -> None:
 
     print(f"manager_name:    {args.manager_name}")
     print(f"source_run:      {args.source_run}")
+    print(f"strategy_dir:    {strategy_dir}")
     print(f"active_runs:     {','.join(active) if active else 'none'}")
     print(f"queued_audits:   {len(audit_queue)}")
     print(f"leader_run:      {leading['run_name']}")
@@ -1239,7 +1325,8 @@ def do_launch_next(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir).resolve()
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
-    strategies = load_strategies(project_dir, args.strategy_dir)
+    strategy_dir = effective_strategy_dir(project_dir, args.strategy_dir, paths, args.expanded_strategy_dir)
+    strategies = load_strategies(project_dir, strategy_dir)
 
     active = active_run_names()
     if args.require_idle and active:
@@ -1304,6 +1391,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         "source_best_train": str(best_train.relative_to(project_dir)),
         "source_plateaued": analysis["plateaued"],
         "strategy": strategy.name,
+        "strategy_dir": strategy_dir,
         "strategy_description": strategy.description,
         "strategy_score": cards[strategy.name].score,
         "run_name": run_name,
@@ -1345,7 +1433,8 @@ def do_supervise(args: argparse.Namespace) -> None:
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
     log_path = paths["logs"] / f"{sanitize_name(args.supervisor_name)}.log"
-    strategies = load_strategies(project_dir, args.strategy_dir)
+    strategy_dir = effective_strategy_dir(project_dir, args.strategy_dir, paths, args.expanded_strategy_dir)
+    strategies = load_strategies(project_dir, strategy_dir)
 
     iteration = 0
     while True:
@@ -1440,6 +1529,39 @@ def do_supervise(args: argparse.Namespace) -> None:
         time.sleep(args.poll_seconds)
 
 
+def do_hardware(args: argparse.Namespace) -> None:
+    project_dir = Path(args.project_dir).resolve()
+    paths = manager_paths(project_dir, args.manager_root, args.manager_name)
+    ensure_manager_dirs(paths)
+    if args.cached_only:
+        profile = load_hardware_profile(paths["hardware_latest"])
+        if profile is None:
+            raise SystemExit(f"No cached hardware profile at {paths['hardware_latest']}")
+    else:
+        profile = detect_remote_hardware(args.remote_host)
+        profile["recommended_strategy_dir"] = (
+            args.expanded_strategy_dir
+            if profile.get("profile_tier") == "expanded" and (project_dir / args.expanded_strategy_dir).exists()
+            else args.strategy_dir
+        )
+        save_json(paths["hardware_latest"], profile)
+
+    print(f"host:            {profile.get('host', args.remote_host)}")
+    print(f"status:          {profile.get('status', 'unknown')}")
+    print(f"profile_tier:    {profile.get('profile_tier', 'unknown')}")
+    print(f"gpu_count:       {profile.get('gpu_count', 0)}")
+    print(f"max_memory_mb:   {profile.get('max_memory_mb', 0)}")
+    print(f"strategy_dir:    {profile.get('recommended_strategy_dir', args.strategy_dir)}")
+    if profile.get("stderr"):
+        print(f"stderr:          {profile['stderr']}")
+    for idx, gpu in enumerate(profile.get("gpus", []), start=1):
+        print(
+            f"gpu_{idx}:         {gpu.get('name','')} "
+            f"memory_mb={gpu.get('memory_mb', 0)} "
+            f"driver={gpu.get('driver_version','')}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lab-manager for autonomous mesh-para runs.")
     parser.add_argument("--project-dir", default=".", help="Path to the mesh-para project.")
@@ -1454,11 +1576,19 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--source-run", required=True, help="Existing run to analyze and promote from.")
     common.add_argument("--tail-window", type=int, default=6, help="How many recent iterations define a plateau.")
     common.add_argument("--strategy", default=None, help="Optional explicit strategy preset.")
+    common.add_argument("--expanded-strategy-dir", default=DEFAULT_EXPANDED_STRATEGY_DIR, help="Strategy directory to prefer automatically when the cached hardware profile allows a larger search space.")
     common.add_argument("--remote-project-dir", default=DEFAULT_REMOTE_PROJECT_DIR, help="Remote project path on bkawk.local.")
     common.add_argument("--remote-audit-root", default=DEFAULT_REMOTE_AUDIT_ROOT, help="Remote workspace root used for isolated audit reruns.")
     common.add_argument("--audit-cache", default=DEFAULT_AUDIT_CACHE, help="Remote cache dir used for larger audit reruns.")
     common.add_argument("--audit-timeout", type=int, default=1200, help="Timeout in seconds for audit reruns.")
     common.add_argument("--audit-max-regression", type=float, default=0.010, help="Maximum allowed audit-score drop when promoting a better main benchmark result.")
+
+    hardware = subparsers.add_parser("hardware", help="Probe the remote GPU hardware and cache a profile for strategy selection.")
+    hardware.add_argument("--remote-host", default="bkawk.local", help="SSH host used for GPU probing.")
+    hardware.add_argument("--strategy-dir", default=DEFAULT_STRATEGY_DIR, help="Baseline strategy directory.")
+    hardware.add_argument("--expanded-strategy-dir", default=DEFAULT_EXPANDED_STRATEGY_DIR, help="Expanded strategy directory to recommend when the hardware profile is strong enough.")
+    hardware.add_argument("--cached-only", action="store_true", help="Print the cached hardware profile without refreshing it.")
+    hardware.set_defaults(func=do_hardware)
 
     recommend = subparsers.add_parser("recommend", parents=[common], help="Suggest the next strategy for a source run.")
     recommend.add_argument("--allow-live-audits", action="store_true", help="Allow recommend to refresh missing audits even when research runs are active.")

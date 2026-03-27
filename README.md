@@ -145,6 +145,15 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   status --source-run boundary512_refocused
 ```
 
+To fingerprint the remote GPU and cache a hardware profile for future manager decisions:
+
+```bash
+python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
+  hardware
+```
+
+That writes a cached profile under [artifacts/manager/default/hardware](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/hardware). If the cached profile says the hardware tier is `expanded` and [strategies_expanded](/Volumes/bkawk/projects/mesh-para/cadresearch/strategies_expanded) exists, the manager automatically prefers that expanded strategy pack instead of the default [strategies](/Volumes/bkawk/projects/mesh-para/cadresearch/strategies).
+
 The status view now distinguishes between the current raw-score leader and the currently resolved canonical baseline. If those differ, the gap usually means a stronger branch exists but has not yet cleared the audit-promotion gate. The `audit_pending` field tells you whether the current leader is already queued for that audit.
 
 Have it plan the next run without launching:
@@ -231,6 +240,8 @@ Because the benchmark is a fixed wall-clock run, better hardware does not just m
 - better overnight throughput for the autonomous loop
 
 In practice, a single RTX 5090 would likely be one of the highest-leverage upgrades for this project. Two 5090s would help even more if used as parallel experiment workers rather than as a distributed trainer.
+
+The repo now has a built-in prep path for that upgrade: cache the new GPU profile with `manager.py hardware`, then let the manager switch into the expanded strategy pack automatically. That gives the lab a controlled way to revisit slightly richer local models and wider neighborhoods when the hardware actually supports them.
 
 More discussion is in [Findings](/Volumes/bkawk/projects/mesh-para/docs/findings.md).
 

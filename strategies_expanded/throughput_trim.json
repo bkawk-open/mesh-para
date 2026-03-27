@@ -1,0 +1,7 @@
+{
+  "name": "throughput_trim",
+  "description": "Still preserve a throughput-first branch even on stronger hardware so the manager can compare richer ideas against simpler fast ones.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only tiny simplifications or fusion changes that could increase effective optimization progress within the fixed 5-minute budget. Do not make the local neighborhood path heavier.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

@@ -1,0 +1,7 @@
+{
+  "name": "boundary_calibration",
+  "description": "Use faster hardware to explore slightly richer boundary-conditioned fusion without drifting into heavy new branches.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only boundary-head usage, boundary-conditioned feature fusion, or boundary loss calibration. On this stronger hardware you may allow a modestly richer fusion block if it stays localized and keeps the code simple. Avoid broad optimizer rewrites or major architecture overhauls.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

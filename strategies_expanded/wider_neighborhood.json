@@ -1,0 +1,7 @@
+{
+  "name": "wider_neighborhood",
+  "description": "Probe slightly larger local neighborhoods or small multi-scale aggregation that were previously too throughput-limited.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only a modestly wider local neighborhood or a small multi-scale local aggregation path. Keep the implementation simple and bounded. Avoid deep stacks, expensive transformers, or large point-count jumps.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}

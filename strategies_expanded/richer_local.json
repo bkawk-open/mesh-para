@@ -1,0 +1,7 @@
+{
+  "name": "richer_local",
+  "description": "Revisit modestly richer local-geometry modeling that was previously too expensive for the old GPU budget.",
+  "prompt_extra": "Build on the current best boundary-supervision baseline. Make exactly one focused change in train.py. Target only a modestly richer local-geometry block: for example slightly stronger edge features, a carefully chosen extra neighborhood fusion, or a small increase in local capacity. Keep the change contained. Do not redesign the whole model or add deep stacks.",
+  "min_improvement": 0.001,
+  "iterations": 16
+}
