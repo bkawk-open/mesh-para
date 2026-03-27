@@ -145,6 +145,8 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   status --source-run boundary512_refocused
 ```
 
+The status view now distinguishes between the current raw-score leader and the currently resolved canonical baseline. If those differ, the gap usually means a stronger branch exists but has not yet cleared the audit-promotion gate.
+
 Have it plan the next run without launching:
 
 ```bash

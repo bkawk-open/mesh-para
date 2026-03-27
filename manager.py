@@ -756,6 +756,8 @@ def collect_status_snapshot(
     write_missing_retrospectives(project_dir, paths, manager_history, artifact_root)
     retro_signals = load_retro_signals(paths["retros"])
     cards = strategy_scorecards(project_dir, strategies, manager_history, artifact_root)
+    leading = highest_scoring_candidate(project_dir, artifact_root, manager_history, source_run)
+    leading["audit"] = cached_audit_result(paths, leading["run_name"], leading["best_train_path"])
     resolved = resolve_source_candidate(
         project_dir,
         paths,
@@ -778,6 +780,7 @@ def collect_status_snapshot(
         "active": active,
         "audit_queue": audit_queue,
         "resolved": resolved,
+        "leading": leading,
         "analysis": analysis,
         "strategy": strategy,
         "latest_launch": latest_launch,
@@ -788,11 +791,15 @@ def collect_status_snapshot(
 
 def format_snapshot_fields(snapshot: dict[str, Any]) -> str:
     resolved = snapshot["resolved"]
+    leading = snapshot["leading"]
     analysis = snapshot["analysis"]
     strategy = snapshot["strategy"]
     return (
+        f"leader_run={leading['run_name']} "
+        f"leader_score={leading['best_score']:.6f} "
         f"best_run={resolved['run_name']} "
         f"best_score={resolved['best_score']:.6f} "
+        f"promotion_gap={leading['best_score'] - resolved['best_score']:.6f} "
         f"queued_audits={len(snapshot['audit_queue'])} "
         f"latest_status={analysis['latest'].get('status') if analysis['latest'] else 'none'} "
         f"next_strategy={strategy.name}"
@@ -939,6 +946,28 @@ def resolve_source_candidate(
             if managed["audit"] is None and audit_queue is not None:
                 queue_audit_target(audit_queue, managed["run_name"], managed["best_train_path"], managed["best_score"])
         if audit_allows_promotion(candidate.get("audit"), managed["audit"], audit_max_regression):
+            candidate = managed
+    return candidate
+
+
+def highest_scoring_candidate(
+    project_dir: Path,
+    artifact_root: str,
+    manager_history: list[dict[str, Any]],
+    explicit_source_run: str,
+) -> dict[str, Any]:
+    best_train, best_log, source_state = best_paths_for_run(project_dir, explicit_source_run, artifact_root)
+    candidate = {
+        "run_name": explicit_source_run,
+        "best_score": float(source_state["best_score"]),
+        "best_log": best_log,
+        "best_train_path": best_train,
+        "state": source_state,
+        "strategy": "source",
+        "timestamp": source_state.get("updated_at", ""),
+    }
+    for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
+        if managed["best_score"] > candidate["best_score"]:
             candidate = managed
     return candidate
 
@@ -1124,6 +1153,7 @@ def do_status(args: argparse.Namespace) -> None:
     active = snapshot["active"]
     audit_queue = snapshot["audit_queue"]
     resolved = snapshot["resolved"]
+    leading = snapshot["leading"]
     analysis = snapshot["analysis"]
     strategy = snapshot["strategy"]
     latest_launch = snapshot["latest_launch"]
@@ -1132,6 +1162,13 @@ def do_status(args: argparse.Namespace) -> None:
     print(f"source_run:      {args.source_run}")
     print(f"active_runs:     {','.join(active) if active else 'none'}")
     print(f"queued_audits:   {len(audit_queue)}")
+    print(f"leader_run:      {leading['run_name']}")
+    print(f"leader_score:    {leading['best_score']:.6f}")
+    leader_audit = leading.get("audit")
+    print(
+        "leader_audit:    "
+        + (f"{leader_audit.status} {format(leader_audit.score, '.6f') if leader_audit.score is not None else 'NA'}" if leader_audit is not None else "missing")
+    )
     print(f"resolved_run:    {resolved['run_name']}")
     print(f"resolved_score:  {resolved['best_score']:.6f}")
     audit = resolved.get("audit")
@@ -1139,6 +1176,7 @@ def do_status(args: argparse.Namespace) -> None:
         "resolved_audit:  "
         + (f"{audit.status} {format(audit.score, '.6f') if audit.score is not None else 'NA'}" if audit is not None else "missing")
     )
+    print(f"promotion_gap:   {leading['best_score'] - resolved['best_score']:.6f}")
     print(f"iterations_done: {analysis['completed']}")
     print(f"plateaued:       {analysis['plateaued']}")
     if analysis["latest"] is not None:
