@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -102,11 +103,13 @@ def manager_paths(project_dir: Path, manager_root: str, manager_name: str) -> di
         "history": root / "history.jsonl",
         "state": root / "state.json",
         "logs": root / "logs",
+        "workspaces": root / "workspaces",
     }
 
 
 def ensure_manager_dirs(paths: dict[str, Path]) -> None:
     paths["logs"].mkdir(parents=True, exist_ok=True)
+    paths["workspaces"].mkdir(parents=True, exist_ok=True)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -304,7 +307,7 @@ def resolve_source_candidate(
 
 
 def launch_screen(
-    project_dir: Path,
+    workspace_dir: Path,
     run_name: str,
     command: str,
     log_path: Path,
@@ -318,7 +321,7 @@ def launch_screen(
             session_name,
             "/bin/zsh",
             "-lc",
-            f"cd {shlex.quote(str(project_dir))} && {command} >> {shlex.quote(str(log_path))} 2>&1",
+            f"cd {shlex.quote(str(workspace_dir))} && {command} >> {shlex.quote(str(log_path))} 2>&1",
         ],
         check=True,
         text=True,
@@ -329,6 +332,7 @@ def build_research_command(
     run_name: str,
     strategy: StrategyPreset,
     baseline_log: Path,
+    artifact_root: Path,
     remote_project_dir: str,
     dataset_cache: str,
     agent: str,
@@ -355,12 +359,40 @@ def build_research_command(
         ),
         "--baseline-log",
         str(baseline_log),
+        "--artifact-root",
+        str(artifact_root),
         "--min-improvement",
         f"{strategy.min_improvement:.3f}",
     ]
     if agent_model:
         parts.extend(["--agent-model", agent_model])
     return shlex.join(parts)
+
+
+def create_workspace(
+    source_project_dir: Path,
+    workspaces_root: Path,
+    run_name: str,
+    best_train_path: Path,
+) -> Path:
+    workspace_dir = workspaces_root / sanitize_name(run_name)
+    if workspace_dir.exists():
+        shutil.rmtree(workspace_dir)
+
+    def ignore(dirname: str, names: list[str]) -> set[str]:
+        ignored: set[str] = set()
+        for name in names:
+            if name in {".git", "artifacts", ".venv", "__pycache__"}:
+                ignored.add(name)
+            elif name.endswith(".pyc"):
+                ignored.add(name)
+            elif name.startswith("._"):
+                ignored.add(name)
+        return ignored
+
+    shutil.copytree(source_project_dir, workspace_dir, ignore=ignore)
+    shutil.copy2(best_train_path, workspace_dir / "train.py")
+    return workspace_dir
 
 
 def do_recommend(args: argparse.Namespace) -> None:
@@ -410,15 +442,13 @@ def do_launch_next(args: argparse.Namespace) -> None:
     source_state = resolved["state"]
     run_name = args.run_name or build_run_name(resolved["run_name"], strategy)
     log_path = project_dir / args.artifact_root / run_name / "overnight_loop.log"
-
-    train_path = project_dir / "train.py"
-    train_text = read_text(best_train)
-    write_text(train_path, train_text)
+    workspace_dir = create_workspace(project_dir, paths["workspaces"], run_name, best_train)
 
     command = build_research_command(
         run_name=run_name,
         strategy=strategy,
         baseline_log=best_log,
+        artifact_root=(project_dir / args.artifact_root).resolve(),
         remote_project_dir=args.remote_project_dir,
         dataset_cache=args.dataset_cache,
         agent=args.agent,
@@ -437,6 +467,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         "strategy": strategy.name,
         "strategy_description": strategy.description,
         "run_name": run_name,
+        "workspace_dir": str(workspace_dir.relative_to(project_dir)),
         "command": command,
         "dry_run": bool(args.dry_run),
     }
@@ -452,7 +483,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         print(f"command:         {command}")
         return
 
-    launch_screen(project_dir, run_name, command, log_path)
+    launch_screen(workspace_dir, run_name, command, log_path)
     record["status"] = "launched"
     record["screen_session"] = sanitize_name(run_name)
     record["log_path"] = str(log_path.relative_to(project_dir))

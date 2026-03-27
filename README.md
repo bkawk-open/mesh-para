@@ -149,6 +149,8 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
 
 The supervisor checks whether any `research.py loop` process is active. If the lab is idle, it asks the manager to launch the next run from the best completed baseline it knows about.
 
+Manager-launched runs execute from disposable copied workspaces under [artifacts/manager](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager), so the main repo checkout can stay clean while autonomy is running.
+
 ## Working with ABC
 
 The current real-data path uses matched ABC mesh, STEP, and feature archives:
