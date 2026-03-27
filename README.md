@@ -72,9 +72,12 @@ Higher is better.
 
 More detailed documentation lives in:
 
-- [Project Overview](/Volumes/bkawk/projects/mesh-para/docs/overview.md)
-- [Findings](/Volumes/bkawk/projects/mesh-para/docs/findings.md)
-- [Workflow](/Volumes/bkawk/projects/mesh-para/docs/workflow.md)
+- [Project Overview](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/overview.md)
+- [Findings](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/findings.md)
+- [Workflow](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/workflow.md)
+- [Next Phase](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/next_phase.md)
+- [Shared Lab Memory](/Volumes/bkawk/projects/mesh-para/cadresearch/docs/shared_lab_memory.md)
+- [Contributing](/Volumes/bkawk/projects/mesh-para/cadresearch/CONTRIBUTING.md)
 
 ## Quick start
 
