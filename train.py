@@ -101,8 +101,14 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
+        self.boundary_feature = nn.Sequential(
+            nn.Linear(fused_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
         self.boundary_fusion = nn.Sequential(
-            nn.Linear(fused_dim + 1, hidden_dim),
+            nn.Linear(fused_dim + hidden_dim + 1, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 4 * hidden_dim),
         )
@@ -132,19 +138,17 @@ class LocalPointModel(nn.Module):
         global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
-        boundary_prob = torch.sigmoid(boundary_logits).unsqueeze(-1)
-        boundary_context = torch.cat([fused, boundary_prob], dim=-1)
-        modulation = self.boundary_fusion(boundary_context)
-        local_scale, global_scale, local_shift, global_shift = modulation.chunk(4, dim=-1)
-        local_scale = 1.0 + 0.25 * torch.tanh(local_scale)
-        global_scale = 1.0 + 0.25 * torch.tanh(global_scale)
-        local_shift = 0.1 * torch.tanh(local_shift)
-        global_shift = 0.1 * torch.tanh(global_shift)
+        boundary_feat = self.boundary_feature(fused)
+        boundary_context = torch.cat([fused, boundary_feat, boundary_logits.unsqueeze(-1)], dim=-1)
+        fusion_params = self.boundary_fusion(boundary_context)
+        local_scale, local_shift, global_scale, global_shift = fusion_params.chunk(4, dim=-1)
+        local_feat = local_feat * (1.0 + 0.5 * torch.tanh(local_scale)) + 0.25 * local_shift
+        global_feat = global_feat * (1.0 + 0.5 * torch.tanh(global_scale)) + 0.25 * global_shift
         task_fused = torch.cat(
             [
                 point_feat,
-                (local_feat * local_scale) + local_shift,
-                (global_feat * global_scale) + global_shift,
+                local_feat,
+                global_feat,
             ],
             dim=-1,
         )
