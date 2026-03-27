@@ -145,7 +145,7 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   status --source-run boundary512_refocused
 ```
 
-The status view now distinguishes between the current raw-score leader and the currently resolved canonical baseline. If those differ, the gap usually means a stronger branch exists but has not yet cleared the audit-promotion gate.
+The status view now distinguishes between the current raw-score leader and the currently resolved canonical baseline. If those differ, the gap usually means a stronger branch exists but has not yet cleared the audit-promotion gate. The `audit_pending` field tells you whether the current leader is already queued for that audit.
 
 Have it plan the next run without launching:
 

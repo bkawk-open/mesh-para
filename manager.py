@@ -809,9 +809,12 @@ def format_snapshot_fields(snapshot: dict[str, Any]) -> str:
     leading = snapshot["leading"]
     analysis = snapshot["analysis"]
     strategy = snapshot["strategy"]
+    leader_hash = file_sha256(leading["best_train_path"])
+    audit_pending = any(item.get("train_hash") == leader_hash for item in snapshot["audit_queue"])
     return (
         f"leader_run={leading['run_name']} "
         f"leader_score={leading['best_score']:.6f} "
+        f"audit_pending={'yes' if audit_pending else 'no'} "
         f"best_run={resolved['run_name']} "
         f"best_score={resolved['best_score']:.6f} "
         f"promotion_gap={leading['best_score'] - resolved['best_score']:.6f} "
@@ -1179,11 +1182,15 @@ def do_status(args: argparse.Namespace) -> None:
     print(f"queued_audits:   {len(audit_queue)}")
     print(f"leader_run:      {leading['run_name']}")
     print(f"leader_score:    {leading['best_score']:.6f}")
+    leader_hash = file_sha256(leading["best_train_path"])
+    leader_pending = sum(1 for item in audit_queue if item.get("train_hash") == leader_hash)
     leader_audit = leading.get("audit")
     print(
         "leader_audit:    "
         + (f"{leader_audit.status} {format(leader_audit.score, '.6f') if leader_audit.score is not None else 'NA'}" if leader_audit is not None else "missing")
     )
+    print(f"audit_pending:   {'yes' if leader_pending else 'no'}")
+    print(f"leader_pending:  {leader_pending}")
     print(f"resolved_run:    {resolved['run_name']}")
     print(f"resolved_score:  {resolved['best_score']:.6f}")
     audit = resolved.get("audit")
