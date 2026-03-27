@@ -136,7 +136,7 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   recommend --source-run boundary512_refocused
 ```
 
-By default, `recommend` stays cache-only while any `research.py loop` is active, so check-ins do not kick off fresh 2048-set audits and steal GPU time from the live worker. Missing audits are queued in [artifacts/manager/default/audit_queue.json](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/audit_queue.json) for the idle supervisor to process later. If you explicitly want a heavier refresh while the lab is busy, pass `--allow-live-audits`.
+By default, `recommend` stays cache-only while any `research.py loop` is active, so check-ins do not kick off fresh 2048-set audits and steal GPU time from the live worker. Missing audits are queued in [artifacts/manager/default/audit_queue.json](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/audit_queue.json) for the idle supervisor to process later, with higher-scoring unresolved branches prioritized first. If you explicitly want a heavier refresh while the lab is busy, pass `--allow-live-audits`.
 
 For a side-effect-free dashboard view of the current lab state:
 

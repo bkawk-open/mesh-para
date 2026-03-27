@@ -185,7 +185,15 @@ def load_audit_queue(path: Path) -> list[dict[str, Any]]:
 
 
 def save_audit_queue(path: Path, queue: list[dict[str, Any]]) -> None:
-    save_json(path, {"items": queue})
+    ordered = sorted(
+        queue,
+        key=lambda item: (
+            float(item.get("best_score", float("-inf"))),
+            str(item.get("queued_at", "")),
+        ),
+        reverse=True,
+    )
+    save_json(path, {"items": ordered})
 
 
 def active_run_names() -> set[str]:
@@ -395,6 +403,13 @@ def queue_audit_target(
             "best_score": best_score,
             "queued_at": utc_now(),
         }
+    )
+    queue.sort(
+        key=lambda item: (
+            float(item.get("best_score", float("-inf"))),
+            str(item.get("queued_at", "")),
+        ),
+        reverse=True,
     )
     return True
 
