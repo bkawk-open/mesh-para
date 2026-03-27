@@ -102,9 +102,9 @@ class LocalPointModel(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
         self.boundary_fusion = nn.Sequential(
-            nn.Linear(fused_dim + 1, hidden_dim // 2),
+            nn.Linear(fused_dim + 1, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim + global_dim),
+            nn.Linear(hidden_dim, 4 * hidden_dim),
         )
 
     def forward(
@@ -132,18 +132,19 @@ class LocalPointModel(nn.Module):
         global_feat = global_feat.expand(-1, points.size(1), -1)
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
-        boundary_context = torch.cat([fused, boundary_logits.unsqueeze(-1)], dim=-1)
-        fusion_gates = torch.sigmoid(self.boundary_fusion(boundary_context))
-        local_gate, global_gate = torch.split(
-            fusion_gates,
-            [local_feat.size(-1), global_feat.size(-1)],
-            dim=-1,
-        )
+        boundary_prob = torch.sigmoid(boundary_logits).unsqueeze(-1)
+        boundary_context = torch.cat([fused, boundary_prob], dim=-1)
+        modulation = self.boundary_fusion(boundary_context)
+        local_scale, global_scale, local_shift, global_shift = modulation.chunk(4, dim=-1)
+        local_scale = 1.0 + 0.25 * torch.tanh(local_scale)
+        global_scale = 1.0 + 0.25 * torch.tanh(global_scale)
+        local_shift = 0.1 * torch.tanh(local_shift)
+        global_shift = 0.1 * torch.tanh(global_shift)
         task_fused = torch.cat(
             [
                 point_feat,
-                local_feat * (1.0 + local_gate),
-                global_feat * (1.0 + global_gate),
+                (local_feat * local_scale) + local_shift,
+                (global_feat * global_scale) + global_shift,
             ],
             dim=-1,
         )
