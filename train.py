@@ -86,13 +86,14 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
         )
         fused_dim = hidden_dim + global_dim + hidden_dim
+        task_fused_dim = fused_dim + hidden_dim
         self.classifier = nn.Sequential(
-            nn.Linear(fused_dim, hidden_dim),
+            nn.Linear(task_fused_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, num_classes),
         )
         self.param_head = nn.Sequential(
-            nn.Linear(fused_dim, hidden_dim),
+            nn.Linear(task_fused_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, param_dim),
         )
@@ -101,11 +102,14 @@ class LocalPointModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.task_fusion = nn.Sequential(
+        self.boundary_fusion = nn.Sequential(
             nn.Linear(fused_dim + 1, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 2),
         )
+        self.class_context_logits = nn.Linear(fused_dim, num_classes)
+        self.class_context_proj = nn.Linear(num_classes, hidden_dim)
+        self.param_fusion = nn.Linear(num_classes, 2)
 
     def forward(
         self,
@@ -133,29 +137,32 @@ class LocalPointModel(nn.Module):
         fused = torch.cat([point_feat, local_feat, global_feat], dim=-1)
         boundary_logits = self.boundary_head(fused).squeeze(-1)
         boundary_context = torch.cat([fused, boundary_logits.unsqueeze(-1)], dim=-1)
-        fusion_gates = torch.sigmoid(self.task_fusion(boundary_context))
-        cls_local_gate = 1.0 + fusion_gates[..., :1]
-        cls_global_gate = 1.0 + fusion_gates[..., 1:2]
-        param_local_gate = 1.0 + fusion_gates[..., 2:3]
-        param_global_gate = 1.0 + fusion_gates[..., 3:4]
-        cls_fused = torch.cat(
+        fusion_gates = torch.sigmoid(self.boundary_fusion(boundary_context))
+        local_gate = 1.0 + fusion_gates[..., :1]
+        global_gate = 1.0 + fusion_gates[..., 1:2]
+        task_fused = torch.cat(
             [
                 point_feat,
-                local_feat * cls_local_gate,
-                global_feat * cls_global_gate,
+                local_feat * local_gate,
+                global_feat * global_gate,
             ],
             dim=-1,
         )
-        param_fused = torch.cat(
+        class_context = F.softmax(self.class_context_logits(task_fused), dim=-1)
+        class_context = self.class_context_proj(class_context)
+        shared_task_fused = torch.cat([task_fused, class_context], dim=-1)
+        logits = self.classifier(shared_task_fused)
+        param_gates = 1.0 + torch.sigmoid(self.param_fusion(F.softmax(logits, dim=-1)))
+        param_task_fused = torch.cat(
             [
                 point_feat,
-                local_feat * param_local_gate,
-                global_feat * param_global_gate,
+                local_feat * local_gate * param_gates[..., :1],
+                global_feat * global_gate * param_gates[..., 1:2],
+                class_context,
             ],
             dim=-1,
         )
-        logits = self.classifier(cls_fused)
-        param_pred = self.param_head(param_fused)
+        param_pred = self.param_head(param_task_fused)
         return logits, param_pred, boundary_logits
 
 
