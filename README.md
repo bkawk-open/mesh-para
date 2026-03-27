@@ -170,6 +170,15 @@ python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   supervise --source-run boundary512_refocused --poll-seconds 600
 ```
 
+For a more reliable single-instance background launcher, use [supervisor_ctl.sh](/Volumes/bkawk/projects/mesh-para/cadresearch/supervisor_ctl.sh):
+
+```bash
+/Volumes/bkawk/projects/mesh-para/cadresearch/supervisor_ctl.sh start
+/Volumes/bkawk/projects/mesh-para/cadresearch/supervisor_ctl.sh status
+/Volumes/bkawk/projects/mesh-para/cadresearch/supervisor_ctl.sh restart
+/Volumes/bkawk/projects/mesh-para/cadresearch/supervisor_ctl.sh stop
+```
+
 The supervisor checks whether any `research.py loop` process is active. If the lab is idle, it asks the manager to launch the next run from the best completed baseline it knows about.
 
 The supervisor log at [artifacts/manager/default/logs/autonomy.log](/Volumes/bkawk/projects/mesh-para/cadresearch/artifacts/manager/default/logs/autonomy.log) now includes compact status snapshots during active runs, and richer decision lines when the lab is idle enough to audit or launch, so you can read the manager's reasoning as a timeline.
