@@ -294,6 +294,25 @@ def build_run_name(source_run: str, strategy: StrategyPreset, stamp: str | None 
     return sanitize_name(f"{source_run}_{strategy.name}_{stamp}")
 
 
+def choose_unique_run_name(
+    project_dir: Path,
+    artifact_root: str,
+    workspaces_root: Path,
+    source_run: str,
+    strategy: StrategyPreset,
+    requested_name: str | None = None,
+) -> str:
+    if requested_name:
+        return requested_name
+    base_name = build_run_name(source_run, strategy)
+    candidate = base_name
+    suffix = 1
+    while (project_dir / artifact_root / candidate).exists() or (workspaces_root / sanitize_name(candidate)).exists():
+        suffix += 1
+        candidate = f"{base_name}_{suffix:02d}"
+    return candidate
+
+
 def resolve_state_path(path_value: str, *bases: Path) -> Path:
     path = Path(path_value)
     if path.is_absolute():
@@ -945,26 +964,28 @@ def resolve_source_candidate(
         candidate["audit"] = cached_audit_result(paths, candidate["run_name"], candidate["best_train_path"])
         if candidate["audit"] is None and audit_queue is not None:
             queue_audit_target(audit_queue, candidate["run_name"], candidate["best_train_path"], candidate["best_score"])
-    for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
-        if managed["best_score"] <= candidate["best_score"]:
-            continue
-        if refresh_audits:
-            managed["audit"] = ensure_audit_result(
-                project_dir,
-                paths,
-                managed["run_name"],
-                managed["best_train_path"],
-                remote_project_dir,
-                remote_audit_root,
-                audit_cache,
-                audit_timeout,
-            )
-        else:
-            managed["audit"] = cached_audit_result(paths, managed["run_name"], managed["best_train_path"])
-            if managed["audit"] is None and audit_queue is not None:
-                queue_audit_target(audit_queue, managed["run_name"], managed["best_train_path"], managed["best_score"])
-        if audit_allows_promotion(candidate.get("audit"), managed["audit"], audit_max_regression):
-            candidate = managed
+    leader = highest_scoring_candidate(project_dir, artifact_root, manager_history, explicit_source_run)
+    if leader["run_name"] == candidate["run_name"]:
+        return candidate
+
+    if refresh_audits:
+        leader["audit"] = ensure_audit_result(
+            project_dir,
+            paths,
+            leader["run_name"],
+            leader["best_train_path"],
+            remote_project_dir,
+            remote_audit_root,
+            audit_cache,
+            audit_timeout,
+        )
+    else:
+        leader["audit"] = cached_audit_result(paths, leader["run_name"], leader["best_train_path"])
+        if leader["audit"] is None and audit_queue is not None:
+            queue_audit_target(audit_queue, leader["run_name"], leader["best_train_path"], leader["best_score"])
+
+    if audit_allows_promotion(candidate.get("audit"), leader.get("audit"), audit_max_regression):
+        candidate = leader
     return candidate
 
 
@@ -1249,9 +1270,16 @@ def do_launch_next(args: argparse.Namespace) -> None:
     best_train = resolved["best_train_path"]
     best_log = resolved["best_log"]
     source_state = resolved["state"]
-    run_name = args.run_name or build_run_name(resolved["run_name"], strategy)
+    run_name = choose_unique_run_name(
+        project_dir,
+        args.artifact_root,
+        paths["workspaces"],
+        resolved["run_name"],
+        strategy,
+        args.run_name,
+    )
     log_path = project_dir / args.artifact_root / run_name / "overnight_loop.log"
-    workspace_dir = create_workspace(project_dir, paths["workspaces"], run_name, best_train)
+    workspace_dir = paths["workspaces"] / sanitize_name(run_name)
 
     command = build_research_command(
         run_name=run_name,
@@ -1296,6 +1324,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
             print(f"command:         {command}")
         return record
 
+    workspace_dir = create_workspace(project_dir, paths["workspaces"], run_name, best_train)
     launch_screen(workspace_dir, run_name, command, log_path)
     record["status"] = "launched"
     record["screen_session"] = sanitize_name(run_name)
