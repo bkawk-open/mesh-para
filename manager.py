@@ -342,6 +342,16 @@ def audit_paths_for(paths: dict[str, Path], run_name: str) -> dict[str, Path]:
     }
 
 
+def cached_audit_result(paths: dict[str, Path], run_name: str, best_train_path: Path) -> AuditResult | None:
+    audit_paths = audit_paths_for(paths, run_name)
+    cached = load_audit_result(audit_paths["json"])
+    if cached is None:
+        return None
+    if cached.train_hash != file_sha256(best_train_path):
+        return None
+    return cached
+
+
 def ensure_audit_result(
     project_dir: Path,
     paths: dict[str, Path],
@@ -725,6 +735,7 @@ def resolve_source_candidate(
     audit_cache: str,
     audit_timeout: int,
     audit_max_regression: float,
+    refresh_audits: bool,
 ) -> dict[str, Any]:
     best_train, best_log, source_state = best_paths_for_run(project_dir, explicit_source_run, artifact_root)
     candidate = {
@@ -736,29 +747,35 @@ def resolve_source_candidate(
         "strategy": "source",
         "timestamp": source_state.get("updated_at", ""),
     }
-    candidate["audit"] = ensure_audit_result(
-        project_dir,
-        paths,
-        candidate["run_name"],
-        candidate["best_train_path"],
-        remote_project_dir,
-        remote_audit_root,
-        audit_cache,
-        audit_timeout,
-    )
-    for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
-        if managed["best_score"] <= candidate["best_score"]:
-            continue
-        managed["audit"] = ensure_audit_result(
+    if refresh_audits:
+        candidate["audit"] = ensure_audit_result(
             project_dir,
             paths,
-            managed["run_name"],
-            managed["best_train_path"],
+            candidate["run_name"],
+            candidate["best_train_path"],
             remote_project_dir,
             remote_audit_root,
             audit_cache,
             audit_timeout,
         )
+    else:
+        candidate["audit"] = cached_audit_result(paths, candidate["run_name"], candidate["best_train_path"])
+    for managed in completed_manager_runs(project_dir, manager_history, artifact_root):
+        if managed["best_score"] <= candidate["best_score"]:
+            continue
+        if refresh_audits:
+            managed["audit"] = ensure_audit_result(
+                project_dir,
+                paths,
+                managed["run_name"],
+                managed["best_train_path"],
+                remote_project_dir,
+                remote_audit_root,
+                audit_cache,
+                audit_timeout,
+            )
+        else:
+            managed["audit"] = cached_audit_result(paths, managed["run_name"], managed["best_train_path"])
         if audit_allows_promotion(candidate.get("audit"), managed["audit"], audit_max_regression):
             candidate = managed
     return candidate
@@ -858,6 +875,8 @@ def do_recommend(args: argparse.Namespace) -> None:
     paths = manager_paths(project_dir, args.manager_root, args.manager_name)
     ensure_manager_dirs(paths)
     strategies = load_strategies(project_dir, args.strategy_dir)
+    active = sorted(active_run_names())
+    refresh_audits = args.allow_live_audits or not active
     manager_history = load_jsonl(paths["history"])
     write_missing_retrospectives(project_dir, paths, manager_history, args.artifact_root)
     retro_signals = load_retro_signals(paths["retros"])
@@ -873,12 +892,16 @@ def do_recommend(args: argparse.Namespace) -> None:
         args.audit_cache,
         args.audit_timeout,
         args.audit_max_regression,
+        refresh_audits,
     )
     history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(history, args.tail_window)
     strategy = choose_strategy_with_stats(strategies, manager_history, cards, retro_signals, args.strategy)
 
     print(f"source_run:      {args.source_run}")
+    print(f"audit_mode:      {'refresh' if refresh_audits else 'cached_only'}")
+    if active:
+        print(f"active_runs:     {','.join(active)}")
     print(f"resolved_run:    {resolved['run_name']}")
     print(f"resolved_score:  {resolved['best_score']:.6f}")
     audit = resolved.get("audit")
@@ -933,6 +956,7 @@ def do_launch_next(args: argparse.Namespace) -> None:
         args.audit_cache,
         args.audit_timeout,
         args.audit_max_regression,
+        True,
     )
     source_history = load_run_history(project_dir, resolved["run_name"], args.artifact_root)
     analysis = analyze_run(source_history, args.tail_window)
@@ -1060,6 +1084,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--audit-max-regression", type=float, default=0.010, help="Maximum allowed audit-score drop when promoting a better main benchmark result.")
 
     recommend = subparsers.add_parser("recommend", parents=[common], help="Suggest the next strategy for a source run.")
+    recommend.add_argument("--allow-live-audits", action="store_true", help="Allow recommend to refresh missing audits even when research runs are active.")
     recommend.set_defaults(func=do_recommend)
 
     launch = subparsers.add_parser("launch-next", parents=[common], help="Promote the best baseline and launch the next run.")

@@ -12,6 +12,14 @@ The repo pattern comes from Karpathy's [autoresearch reference clone](/Volumes/b
 
 @matthew_berman helped put `autoresearch` on our radar in the first place, which is what kicked off this direction for the project.
 
+We also borrowed autonomy and workflow ideas from a few adjacent repos while shaping the manager layer:
+
+- [`karpathy/autoresearch`](https://github.com/karpathy/autoresearch): the core fixed-budget, fixed-metric, keep-or-revert research loop pattern
+- [`obra/superpowers`](https://github.com/obra/superpowers): staged workflow, isolated workspaces, and strategy-pack thinking
+- [`garrytan/gstack`](https://github.com/garrytan/gstack): role separation, orchestration, and manager-style control-plane ideas
+
+This repo stays much narrower than those systems. We borrowed useful patterns, not their full product or agent framework scope.
+
 ## Why this exists
 
 Mesh -> STEP is not a normal format conversion. The mesh has already discarded design intent, and recovering CAD means inferring:
@@ -127,6 +135,8 @@ Ask the manager what it thinks should happen next:
 python3 manager.py --project-dir /Volumes/bkawk/projects/mesh-para/cadresearch \
   recommend --source-run boundary512_refocused
 ```
+
+By default, `recommend` stays cache-only while any `research.py loop` is active, so check-ins do not kick off fresh 2048-set audits and steal GPU time from the live worker. If you explicitly want a heavier refresh while the lab is busy, pass `--allow-live-audits`.
 
 Have it plan the next run without launching:
 
